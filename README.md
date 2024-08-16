@@ -1,0 +1,4 @@
+The Personal Health Assistant System encompasses a BMI calculator and advisory tool that assists users in understanding their Body Mass Index (BMI) and offers personalized diet and exercise recommendations based on their BMI category, gender, and specific conditions such as pregnancy or bodybuilding. 
+The system operates by first calculating the BMI using the weight and height provided by the user.
+Once the BMI is calculated, the system categorizes the individual into one of four categories: Underweight (BMI < 18.5), Healthy Weight (18.5 <= BMI < 24.9), Overweight (25 <= BMI < 29.9), or Obese (BMI >= 30).
+The result is dynamically updated on the graphical user interface along with their weight status, diet advice, and exercise plan. The system also allows the users to clear the entries, export the generated BMI report either in PDF or CSV format, and change the theme of the application through a dropdown menu.
