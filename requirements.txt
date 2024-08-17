@@ -1,0 +1,4 @@
+tk
+matplotlib
+python-csv
+fpdf
