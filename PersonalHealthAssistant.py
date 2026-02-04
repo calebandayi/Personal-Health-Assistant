@@ -3,79 +3,330 @@ from tkinter import messagebox
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
-from tkinter import filedialog
-import csv
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
-# Define default colors and themes
+# Keep pyplot non-interactive for safety
+plt.ioff()
+from tkinter import filedialog, ttk
+import csv
+import json
+import os
+import sys
+import shutil
+from datetime import datetime
+import unicodedata
+import tempfile
+import matplotlib.dates as mdates
+
+# Define default colors and themes (kept for compatibility)
 DEFAULT_THEME = {
     "bg": "white",
     "fg": "black",
-    "button_bg": "#4CAF50",  # Green
-    "button_fg": "white"
+    "button_bg": "#4CAF50",
+    "button_fg": "white",
 }
 
 ALTERNATE_THEME = {
-    "bg": "#263238",  # Dark blue-gray
+    "bg": "#263238",
     "fg": "white",
-    "button_bg": "#FF5722",  # Deep orange
-    "button_fg": "white"
+    "button_bg": "#FF5722",
+    "button_fg": "white",
 }
+
+# Try to use ttkbootstrap for a modern look, fallback to standard ttk
+try:
+    import ttkbootstrap as tb
+    from ttkbootstrap.constants import *
+    _style = tb.Style("flatly")
+    USE_TTB = True
+except Exception:
+    _style = None
+    USE_TTB = False
+
+def apply_theme(theme):
+    # Accept either a theme dict or a theme name string.
+    if isinstance(theme, str):
+        if theme == 'Default':
+            theme = {
+                "bg": "white",
+                "fg": "black",
+                "button_bg": "#4CAF50",
+                "button_fg": "white",
+            }
+        elif theme == 'Alternate':
+            theme = {
+                "bg": "#263238",
+                "fg": "white",
+                "button_bg": "#FF5722",
+                "button_fg": "white",
+            }
+        else:
+            theme = globals().get(theme, {
+                "bg": "white",
+                "fg": "black",
+                "button_bg": "#4CAF50",
+                "button_fg": "white",
+            })
+    # Defensive: ensure theme is a mapping with .get
+    if not hasattr(theme, 'get'):
+        theme = {
+            "bg": "white",
+            "fg": "black",
+            "button_bg": "#4CAF50",
+            "button_fg": "white",
+        }
+
+    # Apply theme colors across ttk styles and key widgets.
+    bg = theme.get("bg", "white")
+    fg = theme.get("fg", "black")
+    button_bg = theme.get("button_bg", "#4CAF50")
+    button_fg = theme.get("button_fg", "white")
+    try:
+        root.configure(bg=bg)
+    except Exception:
+        pass
+
+    try:
+        # Configure common ttk styles
+        style.configure('TFrame', background=bg)
+        style.configure('TLabel', background=bg, foreground=fg)
+        style.configure('TEntry', fieldbackground='#FFFFFF', foreground=fg)
+        style.configure('TButton', background=button_bg, foreground=button_fg)
+        style.configure('Card.TLabelframe', background=bg)
+        style.configure('Card.TLabelframe.Label', background=bg, foreground=fg)
+        # Treeview
+        style.configure('Treeview', background='#FFFFFF', fieldbackground='#FFFFFF', foreground=fg)
+        style.map('TButton', background=[('active', button_bg)])
+    except Exception:
+        pass
+
+    # Try to update specific widgets' colors for immediate visual feedback
+    try:
+        for name in ('main_frame', 'left_frame', 'right_frame', 'bottom_frame', 'results_frame', 'plot_frame'):
+            if name in globals():
+                w = globals()[name]
+                try:
+                    w.configure(style='TFrame')
+                except Exception:
+                    try:
+                        w.config(background=bg)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    try:
+        result_label.config(background=bg, foreground=fg)
+    except Exception:
+        try:
+            result_label.config(foreground=fg)
+        except Exception:
+            pass
+
+    try:
+        profiles_tree.configure(background='#FFFFFF', foreground=fg)
+    except Exception:
+        pass
+
+    # If ttkbootstrap is available, try to set a compatible bootstyle for buttons
+    if USE_TTB:
+        try:
+            # prefer 'primary' for default, 'warning' for alternate if colors differ
+            boot = 'primary'
+            if button_bg and button_bg.startswith('#FF'):
+                boot = 'warning'
+            # apply bootstyle to buttons if they were created via tb.Button
+            for child in root.winfo_children():
+                try:
+                    if isinstance(child, tb.Button):
+                        child.config(bootstyle=boot)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+# Profiles persistence - handle bundled exe case
+try:
+    # PyInstaller creates a temp folder and stores path in _MEIPASS
+    base_path = sys._MEIPASS
+    BUNDLED = True
+except AttributeError:
+    base_path = os.path.dirname(__file__)
+    BUNDLED = False
+
+if BUNDLED:
+    # For bundled exe, store profiles in user's app data directory
+    app_data_dir = os.path.join(os.path.expanduser("~"), "PersonalHealthAssistant")
+    os.makedirs(app_data_dir, exist_ok=True)
+    PROFILES_FILE = os.path.join(app_data_dir, 'profiles.json')
+else:
+    # For development, use local file
+    PROFILES_FILE = os.path.join(base_path, 'profiles.json')
+
+def load_profiles_file():
+    try:
+        # If bundled and profiles file doesn't exist in user directory, copy from bundle
+        if BUNDLED and not os.path.exists(PROFILES_FILE):
+            bundled_profiles = os.path.join(base_path, 'profiles.json')
+            if os.path.exists(bundled_profiles):
+                shutil.copy2(bundled_profiles, PROFILES_FILE)
+
+        if os.path.exists(PROFILES_FILE):
+            with open(PROFILES_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_profiles_file(profiles):
+    try:
+        with open(PROFILES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(profiles, f, indent=2)
+        return True
+    except Exception as e:
+        messagebox.showerror('Error', f'Failed to save profiles: {e}')
+        return False
+
+def update_profiles_view():
+    try:
+        profiles = load_profiles_file()
+        profiles_tree.delete(*profiles_tree.get_children())
+        for name, data in profiles.items():
+            ts = data.get('saved_at', '')
+            profiles_tree.insert('', 'end', iid=name, values=(name, ts))
+    except Exception:
+        pass
+
+def save_profile():
+    name = name_entry.get().strip()
+    if not name:
+        messagebox.showerror('Error', 'Please enter a name to save the profile.')
+        return
+    try:
+        profiles = load_profiles_file()
+        existing = profiles.get(name, {})
+        profile = {
+            'name': name,
+            'weight': weight_entry.get().strip(),
+            'height': height_entry.get().strip(),
+            'age': age_entry.get().strip(),
+            'gender': gender_var.get(),
+            'bodybuilder': int(bodybuilder_var.get()),
+            'expectant': int(expectant_var.get()),
+            'history': existing.get('history', []),
+            'goal': existing.get('goal', {}),
+            'saved_at': datetime.utcnow().isoformat()
+        }
+        profiles[name] = profile
+        if save_profiles_file(profiles):
+            update_profiles_view()
+            messagebox.showinfo('Saved', f'Profile "{name}" saved.')
+    except Exception as e:
+        messagebox.showerror('Error', f'Failed to save profile: {e}')
+
+def load_selected_profile(event=None):
+    sel = profiles_tree.focus()
+    if not sel:
+        selection = profiles_tree.selection()
+        if not selection:
+            messagebox.showerror('Error', 'No profile selected.')
+            return
+        sel = selection[0]
+    profiles = load_profiles_file()
+    profile = profiles.get(sel)
+    if not profile:
+        messagebox.showerror('Error', 'Selected profile not found.')
+        return
+    try:
+        name_entry.delete(0, tk.END)
+        name_entry.insert(0, profile.get('name', ''))
+        weight_entry.delete(0, tk.END)
+        weight_entry.insert(0, profile.get('weight', ''))
+        height_entry.delete(0, tk.END)
+        height_entry.insert(0, profile.get('height', ''))
+        age_entry.delete(0, tk.END)
+        age_entry.insert(0, profile.get('age', ''))
+        gender_var.set(profile.get('gender', 'Male'))
+        bodybuilder_var.set(profile.get('bodybuilder', 0))
+        expectant_var.set(profile.get('expectant', 0))
+        toggle_expectant_check()
+        messagebox.showinfo('Loaded', f'Profile "{profile.get("name")}" loaded.')
+    except Exception as e:
+        messagebox.showerror('Error', f'Failed to load profile: {e}')
+
+def delete_profile():
+    sel = profiles_tree.focus()
+    if not sel:
+        selection = profiles_tree.selection()
+        if not selection:
+            messagebox.showerror('Error', 'No profile selected to delete.')
+            return
+        sel = selection[0]
+    if not messagebox.askyesno('Confirm', f'Delete profile "{sel}"?'):
+        return
+    profiles = load_profiles_file()
+    if sel in profiles:
+        profiles.pop(sel)
+        save_profiles_file(profiles)
+        update_profiles_view()
+        messagebox.showinfo('Deleted', f'Profile "{sel}" deleted.')
 
 DIET_ADVICE = {
     "Underweight": {
         "Male": {
-            "Normal": "Focus on nourishing your body with nutrient-rich foods that can help you gain healthy weight. Consider increasing your calorie intake by incorporating foods such as nuts, seeds, avocados, whole grains, lean proteins like chicken, fish, tofu, and legumes into your diet. Additionally, prioritize regular meals and snacks throughout the day to support weight gain.",
-            "Body Builder": "As a male bodybuilder who is underweight, focus on increasing your calorie intake with nutrient-dense foods to support muscle growth. Include a balance of protein, carbohydrates, and healthy fats in your meals. Consider incorporating foods such as lean meats, eggs, dairy, whole grains, fruits, and vegetables. Additionally, prioritize strength training exercises to build muscle mass."
+            "Normal": "Focus on nourishing your body with nutrient-rich foods that can help you gain healthy weight. Consider increasing your calorie intake by incorporating foods such as groundnuts, sunflower seeds, avocados, ugali (maize meal), brown rice, lean proteins like chicken, tilapia fish, goat meat, beans, and lentils into your diet. Additionally, prioritize regular meals and snacks throughout the day to support weight gain. Include local fruits like mangoes, bananas, and oranges for natural sweetness and nutrients. Consult with a local healthcare provider or nutritionist in Kenya for personalized advice.",
+            "Body Builder": "As a male bodybuilder who is underweight, focus on increasing your calorie intake with nutrient-dense foods to support muscle growth. Include a balance of protein, carbohydrates, and healthy fats in your meals. Consider incorporating foods such as lean meats like chicken or goat, eggs, dairy like milk and yogurt, ugali, brown rice, fruits like bananas and mangoes, and vegetables like sukuma wiki and tomatoes. Additionally, prioritize strength training exercises to build muscle mass. Consult with a local healthcare provider or nutritionist in Kenya for personalized advice."
         },
         "Female": {
-            "Normal": "Focus on nourishing your body with nutrient-rich foods that can help you gain healthy weight. Consider increasing your calorie intake by incorporating foods such as nuts, seeds, avocados, whole grains, lean proteins like chicken, fish, tofu, and legumes into your diet. Additionally, prioritize regular meals and snacks throughout the day to support weight gain.",
+            "Normal": "Focus on nourishing your body with nutrient-rich foods that can help you gain healthy weight. Consider increasing your calorie intake by incorporating foods such as groundnuts, sunflower seeds, avocados, ugali (maize meal), brown rice, lean proteins like chicken, tilapia fish, goat meat, beans, and lentils into your diet. Additionally, prioritize regular meals and snacks throughout the day to support weight gain. Include local fruits like mangoes, bananas, and oranges for natural sweetness and nutrients. Consult with a local healthcare provider or nutritionist in Kenya for personalized advice.",
             "Body Builder": {
-                "Normal": "As a female bodybuilder who is underweight, focus on increasing your calorie intake with nutrient-dense foods to support muscle growth. Include a balance of protein, carbohydrates, and healthy fats in your meals. Consider incorporating foods such as lean meats, eggs, dairy, whole grains, fruits, and vegetables. Additionally, prioritize strength training exercises to build muscle mass.",
-                "Expectant": "As you prepare for motherhood, prioritize your health and your baby's well-being. If you're into bodybuilding, focus on nourishing foods like nuts, lean proteins,seeds, avocados, dairy and whole grains. Stay energized with regular meals and snacks. And remember, consulting your healthcare provider can offer tailored advice for a healthy pregnancy journey.",
+                "Normal": "As a female bodybuilder who is underweight, focus on increasing your calorie intake with nutrient-dense foods to support muscle growth. Include a balance of protein, carbohydrates, and healthy fats in your meals. Consider incorporating foods such as lean meats like chicken or goat, eggs, dairy like milk and yogurt, ugali, brown rice, fruits like bananas and mangoes, and vegetables like sukuma wiki and tomatoes. Additionally, prioritize strength training exercises to build muscle mass. Consult with a local healthcare provider or nutritionist in Kenya for personalized advice.",
+                "Expectant": "As you prepare for motherhood, prioritize your health and your baby's well-being. If you're into bodybuilding, focus on nourishing foods like groundnuts, lean proteins like chicken and fish, avocados, dairy like milk and yogurt, ugali and whole grains. Stay energized with regular meals and snacks. And remember, consulting your healthcare provider can offer tailored advice for a healthy pregnancy journey. In Kenya, include folate-rich foods like sukuma wiki and beans.",
             },
-            "Expectant": "As an expectant female, it's important to focus on gaining weight in a healthy manner to support both your own health and the health of your baby. Incorporate nutrient-dense foods such as nuts, seeds, avocados, lean proteins, whole grains, and dairy into your diet. Aim to eat regular meals and snacks to ensure you're meeting your increased calorie needs during pregnancy. Consult with a healthcare provider or dietitian for personalized guidance."
+            "Expectant": "As an expectant female, it's important to focus on gaining weight in a healthy manner to support both your own health and the health of your baby. Incorporate nutrient-dense foods such as groundnuts, sunflower seeds, avocados, lean proteins like chicken, tilapia, goat meat, ugali, brown rice, and dairy like milk and yogurt into your diet. Aim to eat regular meals and snacks to ensure you're meeting your increased calorie needs during pregnancy. Include local fruits like mangoes and bananas. Consult with a healthcare provider or dietitian for personalized guidance, preferably one familiar with Kenyan dietary practices."
         }
     },
     "Normal weight": {
         "Male": {
-            "Normal": "Maintaining a balanced diet is key to sustaining your current healthy weight. Ensure you're consuming a variety of fruits, vegetables, whole grains, and lean proteins such as poultry, fish, beans, and lentils. Aim for a balanced plate at each meal, focusing on portion control and including foods from all food groups. Remember to stay hydrated by drinking plenty of water throughout the day.",
-            "Body Builder": "As a male bodybuilder with a normal weight, focus on maintaining your current weight while supporting muscle growth and performance. Consume a balanced diet that includes a mix of lean proteins, complex carbohydrates, healthy fats, fruits, and vegetables. Consider timing your meals around your workouts to optimize energy levels and recovery.",
+            "Normal": "Maintaining a balanced diet is key to sustaining your current healthy weight. Ensure you're consuming a variety of fruits like mangoes, bananas, oranges, vegetables like sukuma wiki, tomatoes, onions, ugali (maize meal), brown rice, and lean proteins such as chicken, tilapia fish, goat meat, beans, and lentils. Aim for a balanced plate at each meal, focusing on portion control and including foods from all food groups. Remember to stay hydrated by drinking plenty of water throughout the day. In Kenya, enjoy local dishes like chapati in moderation. Consult with a local healthcare provider for personalized advice.",
+            "Body Builder": "As a male bodybuilder with a normal weight, focus on maintaining your current weight while supporting muscle growth and performance. Consume a balanced diet that includes a mix of lean proteins like chicken, goat meat, eggs, complex carbohydrates like ugali and brown rice, healthy fats from avocados and groundnuts, fruits like bananas and mangoes, and vegetables like sukuma wiki and spinach. Consider timing your meals around your workouts to optimize energy levels and recovery. Consult with a local healthcare provider or nutritionist in Kenya for personalized advice.",
         },
         "Female": {
-            "Normal": "Maintaining a balanced diet is key to sustaining your current healthy weight. Ensure you're consuming a variety of fruits, vegetables, whole grains, and lean proteins such as poultry, fish, beans, and lentils. Aim for a balanced plate at each meal, focusing on portion control and including foods from all food groups. Remember to stay hydrated by drinking plenty of water throughout the day.",
+            "Normal": "Maintaining a balanced diet is key to sustaining your current healthy weight. Ensure you're consuming a variety of fruits like mangoes, bananas, oranges, vegetables like sukuma wiki, tomatoes, onions, ugali (maize meal), brown rice, and lean proteins such as chicken, tilapia fish, goat meat, beans, and lentils. Aim for a balanced plate at each meal, focusing on portion control and including foods from all food groups. Remember to stay hydrated by drinking plenty of water throughout the day. In Kenya, enjoy local dishes like chapati in moderation. Consult with a local healthcare provider for personalized advice.",
             "Body Builder": {
-                "Normal": "As a female bodybuilder with a normal weight, focus on maintaining your current weight while supporting muscle growth and performance. Consume a balanced diet that includes a mix of lean proteins, complex carbohydrates, healthy fats, fruits, and vegetables. Consider timing your meals around your workouts to optimize energy levels and recovery.",
-                "Expectant": "As a bodybuilder with a normal weight who is expecting, continue to prioritize a balanced diet that supports both your health and the health of your baby. Ensure you're consuming a variety of nutrient-dense foods including fruits, vegetables, whole grains, lean proteins, and healthy fats. Stay hydrated and consult with your healthcare provider for personalized nutrition recommendations during pregnancy.",
+                "Normal": "As a female bodybuilder with a normal weight, focus on maintaining your current weight while supporting muscle growth and performance. Consume a balanced diet that includes a mix of lean proteins like chicken, goat meat, eggs, complex carbohydrates like ugali and brown rice, healthy fats from avocados and groundnuts, fruits like bananas and mangoes, and vegetables like sukuma wiki and spinach. Consider timing your meals around your workouts to optimize energy levels and recovery. Consult with a local healthcare provider or nutritionist in Kenya for personalized advice.",
+                "Expectant": "As a bodybuilder with a normal weight who is expecting, continue to prioritize a balanced diet that supports both your health and the health of your baby. Ensure you're consuming a variety of nutrient-dense foods including fruits like mangoes and bananas, vegetables like sukuma wiki and tomatoes, ugali, brown rice, lean proteins like chicken and fish, and healthy fats from avocados. Stay hydrated and consult with your healthcare provider for personalized nutrition recommendations during pregnancy, preferably one familiar with Kenyan diets.",
             },
-            "Expectant": "As an expectant female with a normal weight, prioritize a diet rich in nutrients crucial for pregnancy, such as folate, calcium, iron, and omega-3 fatty acids. Include foods like leafy greens, dairy products, lean meats, fish, nuts, and seeds. Aim for regular, balanced meals and snacks to provide steady energy throughout the day. Consult with your healthcare provider for personalized dietary recommendations to support a healthy pregnancy."
+            "Expectant": "As an expectant female with a normal weight, prioritize a diet rich in nutrients crucial for pregnancy, such as folate, calcium, iron, and omega-3 fatty acids. Include foods like leafy greens such as sukuma wiki, dairy products like milk and yogurt, lean meats like chicken, fish like tilapia, groundnuts, and sunflower seeds. Aim for regular, balanced meals and snacks to provide steady energy throughout the day. Consult with your healthcare provider for personalized dietary recommendations to support a healthy pregnancy, considering local Kenyan foods."
         }
     },
     "Overweight": {
         "Male": {
-            "Normal": "It is important to focus on making gradual, sustainable changes to your diet and lifestyle. Start by incorporating more whole, nutrient-dense foods like fruits, vegetables, lean proteins, and whole grains into your meals. Practice portion control and limit your intake of processed foods, sugary snacks, and high-calorie beverages.",
-            "Body Builder": "As a male bodybuilder who is overweight, focus on creating a calorie deficit through a combination of diet and exercise to support fat loss while maintaining muscle mass. Incorporate plenty of lean proteins, fruits, vegetables, and whole grains into your meals while reducing your intake of high-calorie foods and sugary snacks. Prioritize strength training to preserve muscle mass during weight loss."
+            "Normal": "It is important to focus on making gradual, sustainable changes to your diet and lifestyle. Start by incorporating more whole, nutrient-dense foods like fruits such as mangoes and bananas, vegetables like sukuma wiki, tomatoes, onions, lean proteins like chicken, tilapia fish, goat meat, and ugali (maize meal) or brown rice into your meals. Practice portion control and limit your intake of processed foods, sugary snacks like mandazi, and high-calorie beverages like soda. In Kenya, reduce consumption of fried foods and opt for grilled or boiled options. Consult with a local healthcare provider or nutritionist for personalized advice.",
+            "Body Builder": "As a male bodybuilder who is overweight, focus on creating a calorie deficit through a combination of diet and exercise to support fat loss while maintaining muscle mass. Incorporate plenty of lean proteins like chicken, goat meat, eggs, fruits like bananas and oranges, vegetables like sukuma wiki and spinach, and ugali or brown rice into your meals while reducing your intake of high-calorie foods and sugary snacks. Prioritize strength training to preserve muscle mass during weight loss. Consult with a local healthcare provider or nutritionist in Kenya for personalized advice."
         },
         "Female": {
-            "Normal": "It is important to focus on making gradual, sustainable changes to your diet and lifestyle. Start by incorporating more whole, nutrient-dense foods like fruits, vegetables, lean proteins, and whole grains into your meals. Practice portion control and limit your intake of processed foods, sugary snacks, and high-calorie beverages.",
+            "Normal": "It is important to focus on making gradual, sustainable changes to your diet and lifestyle. Start by incorporating more whole, nutrient-dense foods like fruits such as mangoes and bananas, vegetables like sukuma wiki, tomatoes, onions, lean proteins like chicken, tilapia fish, goat meat, and ugali (maize meal) or brown rice into your meals. Practice portion control and limit your intake of processed foods, sugary snacks like mandazi, and high-calorie beverages like soda. In Kenya, reduce consumption of fried foods and opt for grilled or boiled options. Consult with a local healthcare provider or nutritionist for personalized advice.",
             "Body Builder": {
-                "Normal": "As a female bodybuilder who is overweight, focus on creating a calorie deficit through a combination of diet and exercise to support fat loss while maintaining muscle mass. Incorporate plenty of lean proteins, fruits, vegetables, and whole grains into your meals while reducing your intake of high-calorie foods and sugary snacks. Prioritize strength training to preserve muscle mass during weight loss.",
-                "Expectant": "As a bodybuilder who is overweight and expecting, it's important to focus on gaining weight in a healthy manner to support both your own health and the health of your baby. Aim to make gradual, sustainable changes to your diet by incorporating more whole, nutrient-dense foods while reducing your intake of processed foods, sugary snacks, and high-calorie beverages. Consult with a healthcare provider or dietitian for personalized guidance.",
+                "Normal": "As a female bodybuilder who is overweight, focus on creating a calorie deficit through a combination of diet and exercise to support fat loss while maintaining muscle mass. Incorporate plenty of lean proteins like chicken, goat meat, eggs, fruits like bananas and oranges, vegetables like sukuma wiki and spinach, and ugali or brown rice into your meals while reducing your intake of high-calorie foods and sugary snacks. Prioritize strength training to preserve muscle mass during weight loss. Consult with a local healthcare provider or nutritionist in Kenya for personalized advice.",
+                "Expectant": "As a bodybuilder who is overweight and expecting, it's important to focus on gaining weight in a healthy manner to support both your own health and the health of your baby. Aim to make gradual, sustainable changes to your diet by incorporating more whole, nutrient-dense foods like fruits, vegetables, lean proteins, and ugali while reducing your intake of processed foods, sugary snacks, and high-calorie beverages. Consult with a healthcare provider or dietitian for personalized guidance, preferably one familiar with Kenyan dietary practices.",
             },
-            "Expectant": "As an expectant female who is overweight, it is important to focus on making gradual, sustainable changes to your diet and lifestyle to support both your health and the health of your baby. Incorporate more whole, nutrient-dense foods like fruits, vegetables, lean proteins, and whole grains into your meals. Practice portion control and limit your intake of processed foods, sugary snacks, and high-calorie beverages. Consult with a healthcare provider or dietitian for personalized guidance during pregnancy."
+            "Expectant": "As an expectant female who is overweight, it is important to focus on making gradual, sustainable changes to your diet and lifestyle to support both your health and the health of your baby. Incorporate more whole, nutrient-dense foods like fruits such as mangoes, vegetables like sukuma wiki, lean proteins like chicken and fish, and ugali into your meals. Practice portion control and limit your intake of processed foods, sugary snacks, and high-calorie beverages. Consult with a healthcare provider or dietitian for personalized guidance during pregnancy, considering local Kenyan foods."
         }
     },
     "Obese": {
         "Male": {
-            "Normal": "As an obese male seeking to improve health, focus on a balanced diet rich in fruits, vegetables, lean proteins, and whole grains while reducing intake of high-calorie processed foods. Emphasize portion control and consider meal planning to support weight loss goals.",
-            "Body Builder": "As a male bodybuilder who is obese, prioritize seeking support from healthcare professionals or registered dietitians who can provide personalized guidance and support. Together, you can develop a comprehensive meal plan tailored to your specific dietary needs and weight loss goals. Focus on incorporating plenty of fruits, vegetables, lean proteins, and whole grains into your diet while reducing your intake of high-calorie, processed foods.",
+            "Normal": "As an obese male seeking to improve health, focus on a balanced diet rich in fruits like mangoes and bananas, vegetables like sukuma wiki and tomatoes, lean proteins like chicken, tilapia fish, goat meat, and ugali (maize meal) or brown rice while reducing intake of high-calorie processed foods like fried snacks. Emphasize portion control and consider meal planning to support weight loss goals. In Kenya, limit sugary drinks and opt for water or herbal teas. Consult with a local healthcare provider or nutritionist for personalized advice.",
+            "Body Builder": "As a male bodybuilder who is obese, prioritize seeking support from healthcare professionals or registered dietitians who can provide personalized guidance and support. Together, you can develop a comprehensive meal plan tailored to your specific dietary needs and weight loss goals. Focus on incorporating plenty of fruits like bananas, vegetables like sukuma wiki, lean proteins like chicken and goat meat, and ugali or brown rice into your diet while reducing your intake of high-calorie, processed foods. Consult with a local healthcare provider or nutritionist in Kenya for personalized advice.",
         },
         "Female": {
-            "Normal": "As an obese female focused on health improvement, emphasize a balanced diet with plenty of fruits, vegetables, lean proteins, and whole grains while minimizing high-calorie processed foods. Practice portion control and consider meal planning to support weight loss efforts.",
+            "Normal": "As an obese female focused on health improvement, emphasize a balanced diet with plenty of fruits like mangoes and bananas, vegetables like sukuma wiki and tomatoes, lean proteins like chicken, tilapia fish, goat meat, and ugali (maize meal) or brown rice while minimizing high-calorie processed foods. Practice portion control and consider meal planning to support weight loss efforts. In Kenya, limit sugary drinks and opt for water or herbal teas. Consult with a local healthcare provider or nutritionist for personalized advice.",
             "Body Builder": {
-                "Normal": "As a female bodybuilder who is obese, prioritize seeking support from healthcare professionals or registered dietitians who can provide personalized guidance and support. Together, you can develop a comprehensive meal plan tailored to your specific dietary needs and weight loss goals. Focus on incorporating plenty of fruits, vegetables, lean proteins, and whole grains into your diet while reducing your intake of high-calorie, processed foods.",
-                "Expectant": "As a bodybuilder who is obese and expecting, it's important to focus on gaining weight in a healthy manner to support both your own health and the health of your baby. Seek support from healthcare professionals or registered dietitians who can provide personalized guidance and support. Together, you can develop a comprehensive meal plan tailored to your specific dietary needs and weight loss goals. Focus on incorporating plenty of fruits, vegetables, lean proteins, and whole grains into your diet while reducing your intake of high-calorie, processed foods.",
+                "Normal": "As a female bodybuilder who is obese, prioritize seeking support from healthcare professionals or registered dietitians who can provide personalized guidance and support. Together, you can develop a comprehensive meal plan tailored to your specific dietary needs and weight loss goals. Focus on incorporating plenty of fruits like bananas, vegetables like sukuma wiki, lean proteins like chicken and goat meat, and ugali or brown rice into your diet while reducing your intake of high-calorie, processed foods. Consult with a local healthcare provider or nutritionist in Kenya for personalized advice.",
+                "Expectant": "As a bodybuilder who is obese and expecting, it's important to focus on gaining weight in a healthy manner to support both your own health and the health of your baby. Seek support from healthcare professionals or registered dietitians who can provide personalized guidance and support. Together, you can develop a comprehensive meal plan tailored to your specific dietary needs and weight loss goals. Focus on incorporating plenty of fruits like mangoes, vegetables like sukuma wiki, lean proteins like chicken and fish, and ugali into your diet while reducing your intake of high-calorie, processed foods. Consult with a healthcare provider familiar with Kenyan diets.",
             },
-            "Expectant": "As an expectant female considered obese,it is important to focus on a balanced diet that supports both your health and the health of your baby. Aim to consume a variety of nutrient-dense foods including fruits, vegetables, lean proteins, whole grains, and healthy fats. Practice portion control and limit your intake of processed foods, sugary snacks, and high-calorie beverages. Ensure you stay hydrated by drinking plenty of water throughout the day. While it's beneficial to consult with healthcare professionals, focusing on a healthy diet can be a positive step in managing weight during pregnancy."
+            "Expectant": "As an expectant female considered obese, it is important to focus on a balanced diet that supports both your health and the health of your baby. Aim to consume a variety of nutrient-dense foods including fruits like mangoes and bananas, vegetables like sukuma wiki and tomatoes, lean proteins like chicken and tilapia, ugali or brown rice, and healthy fats from avocados. Practice portion control and limit your intake of processed foods, sugary snacks, and high-calorie beverages. Ensure you stay hydrated by drinking plenty of water throughout the day. While it's beneficial to consult with healthcare professionals, focusing on a healthy diet can be a positive step in managing weight during pregnancy. Seek advice from a local Kenyan healthcare provider."
         }
     }
 }
@@ -147,19 +398,8 @@ EXERCISE_PLANS = {
     }
 }
 
-def apply_theme(theme):
-    root.configure(bg=theme["bg"])
-    result_label.configure(bg=theme["bg"], fg=theme["fg"], font=("Arial", 12))
-    calculate_button.configure(bg=theme["button_bg"], fg=theme["button_fg"], font=("Arial", 12))
-    clear_button.configure(bg=theme["button_bg"], fg=theme["button_fg"], font=("Arial", 12))
-    export_button.configure(bg=theme["button_bg"], fg=theme["button_fg"], font=("Arial", 12))
-
-def apply_theme(theme):
-    root.configure(bg=theme["bg"])
-    result_label.configure(bg=theme["bg"], fg=theme["fg"], font=("Arial", 12))
-    calculate_button.configure(bg=theme["button_bg"], fg=theme["button_fg"], font=("Arial", 12))
-    clear_button.configure(bg=theme["button_bg"], fg=theme["button_fg"], font=("Arial", 12))
-    export_button.configure(bg=theme["button_bg"], fg=theme["button_fg"], font=("Arial", 12))
+# `apply_theme` handled earlier with ttkbootstrap fallback; GUI styling
+# should be managed by ttk/ttkbootstrap style objects where available.
 
 def calculate_bmi(weight, height):
     """
@@ -172,27 +412,7 @@ def calculate_bmi(weight, height):
     bmi = weight / (height ** 2)
     return bmi
 
-def calculate_and_show_bmi():
-    try:
-        age = float(age_entry.get())
-        weight = float(weight_entry.get())
-        height = float(height_entry.get())
-
-        bmi = calculate_bmi(weight, height)
-        gender = gender_var.get()
-        is_bodybuilder = bodybuilder_var.get()
-        is_expectant = expectant_var.get()
-
-        if bmi is not None:
-            status, color, advice = interpret_bmi(weight, height, gender, is_bodybuilder, is_expectant)
-            if status is not None:
-                result_label.config(text=f"Status: {status}\nAdvice: {advice}", fg=color)
-            else:
-                messagebox.showerror("Error", "Failed to calculate BMI.")
-        else:
-            messagebox.showerror("Error", "Failed to calculate BMI.")
-    except ValueError:
-        messagebox.showerror("Error", "Please enter valid numerical values for age, weight, and height.")
+# Note: older, simpler `calculate_and_show_bmi` removed to avoid duplicate definitions.
 
 def interpret_bmi(weight, height, gender, is_bodybuilder=False, is_expectant=False):
     bmi = calculate_bmi(weight, height)
@@ -246,79 +466,346 @@ def interpret_bmi(weight, height, gender, is_bodybuilder=False, is_expectant=Fal
     else:
         return None, None, None, None
 
+
+def generate_personalized_advice(bmi_category, gender, age, is_bodybuilder, is_expectant, diet_pref, base_advice, base_plan):
+    """Create expanded, AI-like advice text using profile and base advice/plan.
+
+    This is a deterministic template-based generator (no external AI required).
+    """
+    lines = []
+    lines.append(f"Summary: You are classified as {bmi_category}. {base_advice}")
+
+    # Tone and focus
+    focus = "muscle-building and higher protein" if is_bodybuilder else "balanced health and gradual change"
+    if is_expectant:
+        focus = "supporting pregnancy nutrition and gentle activity"
+
+    lines.append(f"Focus: {focus}. Recommended approach: small, sustainable steps with consistent tracking.")
+
+    # Diet-specific suggestions
+    if diet_pref == 'Vegetarian':
+        protein_sources = 'beans, lentils, groundnuts, tofu, tempeh, Greek yogurt, cottage cheese, eggs (if used)'
+    elif diet_pref == 'Vegan':
+        protein_sources = 'lentils, chickpeas, groundnuts, tofu, tempeh, seitan, soy-based products, nuts and seeds'
+    elif diet_pref == 'Pescatarian':
+        protein_sources = 'tilapia, Nile perch, eggs, dairy, beans and ugali'
+    elif diet_pref == 'Keto':
+        protein_sources = 'fatty fish like tilapia, meats like goat, eggs, high-fat dairy, groundnuts and sunflower seeds, low-carb vegetables like sukuma wiki'
+    elif diet_pref == 'Low-Carb':
+        protein_sources = 'lean meats like chicken, goat, tilapia, eggs, sukuma wiki, groundnuts and sunflower seeds'
+    else:
+        protein_sources = 'lean meats like chicken, goat, tilapia, eggs, dairy, beans, and groundnuts'
+
+    lines.append(f"Good protein and nutrient sources for a {diet_pref.lower()} approach: {protein_sources}.")
+
+    # Sample day depending on BMI category
+    if bmi_category in ('Underweight',):
+        lines.append("Sample day: Breakfast — ugali with groundnut butter, banana, and milk; Snack — yogurt + mixed nuts; Lunch — rice salad with beans; Snack — smoothie with protein powder; Dinner — tilapia or lentils with sweet potato and sukuma wiki.")
+    elif bmi_category in ('Normal weight',):
+        lines.append("Sample day: Breakfast — eggs/avocado on chapati; Snack — fruit + nuts; Lunch — grilled chicken or bean stew with brown rice; Snack — hummus + veggies; Dinner — fish/legume stew and sukuma wiki salad.")
+    else:
+        lines.append("Sample day: Breakfast — Greek yogurt with mangoes and sunflower seeds; Snack — raw veggies like tomatoes and hummus; Lunch — large sukuma wiki salad with lean protein like chicken; Snack — orange + groundnut butter; Dinner — grilled tilapia/lean goat meat and steamed vegetables.")
+
+    # Practical tips
+    tips = [
+        "Aim for 3 balanced meals and 1–2 nutrient-dense snacks per day.",
+        "Include one source of protein with each meal to support satiety and muscle maintenance.",
+        "Prefer whole foods over processed options; read labels for added sugars and sodium.",
+        "Stay hydrated — water before meals can help with appetite regulation.",
+    ]
+    if is_bodybuilder:
+        tips.append("Consider timing carbohydrate intake around workouts and prioritize post-workout protein for recovery.")
+    if is_expectant:
+        tips.append("Ensure adequate folate, iron and calcium; consult your healthcare provider for prenatal vitamins.")
+
+    lines.append("Practical tips: " + ' '.join(tips))
+
+    # Weekly micro-plan (3 bullet points)
+    lines.append("Weekly micro-plan: 1) Plan 3 dinners that include a lean protein + 2 vegetables; 2) Prep 2 portable snacks (nuts, yogurt, hummus+veggies); 3) Schedule 3 short strength or brisk-walk sessions.")
+
+    # Safety / personalization note
+    lines.append("Note: These suggestions are general. For medical conditions, pregnancy concerns, or special dietary needs, consult a healthcare professional or registered dietitian.")
+
+    return '\n\n'.join(lines)
+
 def calculate_and_show_bmi():
-    weight_str = weight_entry.get()
-    height_str = height_entry.get()
-    age_str = age_entry.get()
-
-    if not validate_input(weight_str, height_str, age_str):
-        return
-
-    weight = float(weight_str)
-    height = float(height_str)
-    age = int(age_str)
-
-    gender = gender_var.get()
-    bmi = calculate_bmi(weight, height)
-    is_expectant = expectant_var.get() == 1
-    is_bodybuilder = bodybuilder_var.get() == 1
-    status, color, advice, plan = interpret_bmi(weight, height, gender, is_bodybuilder=is_bodybuilder, is_expectant=is_expectant)
-
-    result_label.config(
-        text=f"Your BMI is: {bmi:.2f}\nYou are considered: {status}\nDiet advice: {advice}\nExercise Plan: {plan}", fg=color)
-
-    # Plot BMI categories
-    plot_bmi_categories(bmi)
-
-def validate_input(weight_str, height_str, age_str):
     try:
+        weight_str = weight_entry.get()
+        height_str = height_entry.get()
+        age_str = age_entry.get()
+
+        if not validate_input(weight_str, height_str, age_str):
+            return
+
         weight = float(weight_str)
         height = float(height_str)
         age = int(age_str)
 
-        if weight <= 0 or weight > 635:
-            raise ValueError("Weight must be a positive number less than or equal to 635.")
+        gender = gender_var.get()
+        is_expectant = expectant_var.get() == 1
+        is_bodybuilder = bodybuilder_var.get() == 1
+        bmi = calculate_bmi(weight, height)
+        status, color, advice, plan = interpret_bmi(weight, height, gender, is_bodybuilder=is_bodybuilder, is_expectant=is_expectant)
 
-        if height <= 0 or height > 2.72:
-            raise ValueError("Height must be a positive number less than or equal to 2.72.")
+        # Record data for tracking
+        name = name_entry.get().strip()
+        if name:
+            try:
+                profiles = load_profiles_file()
+                if name not in profiles:
+                    profiles[name] = {'history': []}
+                entry = {
+                    'date': datetime.utcnow().isoformat(),
+                    'weight': weight,
+                    'height': height,
+                    'bmi': bmi,
+                    'category': status.split(' ')[0],
+                    'gender': gender,
+                    'age': age,
+                    'bodybuilder': is_bodybuilder,
+                    'expectant': is_expectant
+                }
+                profiles[name]['history'].append(entry)
+                save_profiles_file(profiles)
+            except Exception:
+                pass  # Silently fail for history recording
 
-        if age <= 0 or age > 130:
-            raise ValueError("Age must be a positive integer less than or equal to 130.")
+        # Generate expanded AI-like suggestions using diet preference and profile
+        diet_pref = 'Omnivore'
 
-        return True
+        detailed = generate_personalized_advice(status.split(' ')[0], gender, age, is_bodybuilder, is_expectant, diet_pref, advice, plan)
 
-    except ValueError as e:
-        print(e)
-        messagebox.showerror("Error", str(e))
+        # Analyze trend for encouragement/warning
+        trend_message = ""
+        goal_message = ""
+        if name:
+            try:
+                profiles = load_profiles_file()
+                profile = profiles.get(name, {})
+                history = profile.get('history', [])
+                goal = profile.get('goal', {})
+                
+                # Trend analysis
+                if len(history) >= 2:
+                    last_entry = history[-1]
+                    prev_entry = history[-2]
+                    last_bmi = last_entry['bmi']
+                    prev_bmi = prev_entry['bmi']
+                    last_weight = last_entry['weight']
+                    prev_weight = prev_entry['weight']
+                    category = status.split(' ')[0]
+                    bmi_delta = last_bmi - prev_bmi
+                    weight_delta = last_weight - prev_weight
+                    
+                    bmi_trend = ""
+                    if last_bmi < prev_bmi:
+                        bmi_trend = f"🎉 BMI decreased by {prev_bmi - last_bmi:.2f} points"
+                    elif last_bmi > prev_bmi:
+                        bmi_trend = f"⚠️ BMI increased by {last_bmi - prev_bmi:.2f} points"
+                    else:
+                        bmi_trend = "BMI is stable"
+                    
+                    weight_trend = ""
+                    if last_weight < prev_weight:
+                        weight_trend = f" (Weight down {prev_weight - last_weight:.1f} kg)"
+                    elif last_weight > prev_weight:
+                        weight_trend = f" (Weight up {last_weight - prev_weight:.1f} kg)"
+                    else:
+                        weight_trend = " (Weight stable)"
+                    
+                    trend_message = f"{bmi_trend}{weight_trend}. "
+
+                    # Tailor guidance by BMI category and recent changes
+                    drastic_weight_change = abs(weight_delta) >= 2.0
+                    drastic_bmi_change = abs(bmi_delta) >= 1.0
+
+                    if category == "Underweight":
+                        if weight_delta > 0 or bmi_delta > 0:
+                            trend_message += "Great progress. Keep working toward gradual weight gain."
+                        elif weight_delta < 0 or bmi_delta < 0:
+                            trend_message += "Focus on increasing weight with nutrient-dense meals."
+                        else:
+                            trend_message += "Aim for a slow, steady weight increase."
+                    elif category in ("Overweight", "Obese"):
+                        if weight_delta < 0 or bmi_delta < 0:
+                            trend_message += "Good direction. Keep focusing on gradual weight loss."
+                        elif weight_delta > 0 or bmi_delta > 0:
+                            trend_message += "Focus on healthy weight reduction habits."
+                        else:
+                            trend_message += "Consider a gradual weight-loss plan."
+                    else:
+                        if drastic_weight_change or drastic_bmi_change:
+                            trend_message += "Warning: large recent changes. Try to keep weight changes gradual and steady."
+                        elif weight_delta != 0 or bmi_delta != 0:
+                            trend_message += "Small changes are normal. Keep monitoring your trend."
+                        else:
+                            trend_message += "Maintain your current routine."
+                    
+                    # Long-term trend
+                    if len(history) >= 3:
+                        first_bmi = history[0]['bmi']
+                        if last_bmi < first_bmi:
+                            trend_message += f" Overall, strong downward trend since first calculation ({first_bmi - last_bmi:.2f} points lower)."
+                        elif last_bmi > first_bmi:
+                            trend_message += f" Overall, upward trend since first calculation ({last_bmi - first_bmi:.2f} points higher)."
+                        else:
+                            trend_message += " Overall trend is stable."
+                
+                # Goal progress
+                if goal:
+                    current_weight = weight
+                    current_bmi = bmi
+                    goal_weight = goal.get('weight')
+                    goal_bmi = goal.get('bmi')
+                    
+                    if goal_weight:
+                        diff = goal_weight - current_weight
+                        if abs(diff) < 0.1:
+                            goal_message += f"🎯 Weight goal achieved! "
+                        elif diff > 0:
+                            goal_message += f"📈 {diff:.1f} kg to reach weight goal. "
+                        else:
+                            goal_message += f"⚠️ {abs(diff):.1f} kg over weight goal. "
+                    
+                    if goal_bmi:
+                        diff_bmi = goal_bmi - current_bmi
+                        if abs(diff_bmi) < 0.1:
+                            goal_message += f"BMI goal achieved!"
+                        elif diff_bmi > 0:
+                            goal_message += f"{diff_bmi:.2f} BMI points to goal."
+                        else:
+                            goal_message += f"{abs(diff_bmi):.2f} BMI points over goal."
+                    
+                    if goal_message:
+                        goal_message = "Goal Progress: " + goal_message
+                
+            except:
+                pass
+
+        if trend_message:
+            detailed += "\n\n" + trend_message
+        if goal_message:
+            detailed += "\n\n" + goal_message
+
+        # If a named profile has a goal, append a goal-achievement micro-plan
+        try:
+            name = name_entry.get().strip()
+            profiles = load_profiles_file()
+            if name and name in profiles and profiles[name].get('goal'):
+                goal_plan = generate_goal_plan(name)
+                if goal_plan:
+                    detailed = detailed + "\n\nGOAL PLAN:\n" + goal_plan
+        except Exception:
+            pass
+
+        # store last detailed advice for viewer
+        global last_advice_text
+        last_advice_text = detailed
+
+        # Show a concise summary in the results label, detailed view available via button
+        summary = f"Your BMI is: {bmi:.2f}\nYou are considered: {status}\nTap 'Detailed Advice' for meal ideas and tips."
+        if trend_message:
+            summary += "\n\n" + trend_message
+        result_label.config(text=summary, foreground=color)
+
+        # Plot BMI categories
+        plot_bmi_categories(bmi)
+
+        # Record reading into profile history when a name is provided.
+        try:
+            name = name_entry.get().strip()
+            if name:
+                add_history_entry(name, weight, height, bmi)
+        except Exception:
+            pass
+    except Exception as e:
+        messagebox.showerror("Error", f"An error occurred: {e}")
+
+def validate_input(weight_str, height_str, age_str):
+    weight_str = weight_str.strip()
+    height_str = height_str.strip()
+    age_str = age_str.strip()
+
+    if not weight_str or not height_str or not age_str:
+        messagebox.showerror("Error", "Please enter weight, height, and age.")
         return False
 
+    try:
+        weight = float(weight_str)
+    except ValueError:
+        messagebox.showerror("Error", "Weight must be a number.")
+        return False
+
+    try:
+        height = float(height_str)
+    except ValueError:
+        messagebox.showerror("Error", "Height must be a number.")
+        return False
+
+    try:
+        age = int(age_str)
+    except ValueError:
+        messagebox.showerror("Error", "Age must be a whole number.")
+        return False
+
+    if weight <= 0 or weight > 635:
+        messagebox.showerror("Error", "Weight must be a positive number less than or equal to 635.")
+        return False
+
+    if height <= 0 or height > 2.72:
+        messagebox.showerror("Error", "Height must be a positive number less than or equal to 2.72.")
+        return False
+
+    if age <= 0 or age > 130:
+        messagebox.showerror("Error", "Age must be a positive integer less than or equal to 130.")
+        return False
+
+    return True
+
 def plot_bmi_categories(user_bmi):
-    plt.figure(figsize=(8, 6))
-    bars = plt.bar(list(BMI_CATEGORIES.keys()), BMI_VALUES, color=BMI_COLORS)
+    # Create a Figure and draw onto it, then embed into the GUI
+    try:
+        plt.close('all')
+    except Exception:
+        pass
 
-    # Plot user's BMI as a marker
-    plt.plot([-0.5, len(list(BMI_CATEGORIES.keys())) - 0.5], [user_bmi,
-             user_bmi], color='blue', linestyle='--', label='Your BMI')
+    fig = Figure(figsize=(6, 4), dpi=100)
+    ax = fig.add_subplot(111)
+    bars = ax.bar(list(BMI_CATEGORIES.keys()), BMI_VALUES, color=BMI_COLORS)
 
-    # Add labels to the bars indicating BMI ranges
+    # Plot user's BMI as a horizontal marker line
+    ax.plot([-0.5, len(list(BMI_CATEGORIES.keys())) - 0.5], [user_bmi, user_bmi], color='blue', linestyle='--', label='Your BMI')
+
     for i, bar in enumerate(bars):
-        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5, f"{BMI_VALUES[i]:.1f}", ha='center', va='bottom')
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5, f"{BMI_VALUES[i]:.1f}", ha='center', va='bottom')
 
-    # Highlight healthy BMI range
-    plt.axhspan(BMI_VALUES[0], BMI_VALUES[1], color='green', alpha=0.1, label='Healthy Range')
+    ax.axhspan(BMI_VALUES[0], BMI_VALUES[1], color='green', alpha=0.1, label='Healthy Range')
+    ax.set_xlabel('BMI Categories')
+    ax.set_ylabel('BMI Value')
+    ax.set_title('BMI Categories')
+    ax.grid(True)
+    ax.legend()
 
-    # Customize legend
-    plt.legend()
+    # Embed in Tkinter: destroy previous canvas if present
+    global plot_canvas, plot_frame
+    try:
+        if plot_canvas:
+            plot_canvas.get_tk_widget().destroy()
+    except Exception:
+        pass
+    # Ensure plot_frame (created in layout) exists; otherwise create inside bottom_frame
+    try:
+        if plot_frame is None:
+            plot_frame = ttk.Frame(bottom_frame)
+            plot_frame.grid(row=0, column=1, sticky='nsew', padx=(8,4), pady=4)
+    except Exception:
+        plot_frame = ttk.Frame(bottom_frame)
+        plot_frame.grid(row=0, column=1, sticky='nsew', padx=(8,4), pady=4)
 
-    # Add titles and labels
-    plt.xlabel('BMI Categories')
-    plt.ylabel('BMI Value')
-    plt.title('BMI Categories')
-    plt.grid(True)
-
-    # Show plot
-    plt.tight_layout()
-    plt.show()
+    plot_canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+    plot_canvas.draw()
+    plot_widget = plot_canvas.get_tk_widget()
+    plot_widget.pack(fill='both', expand=True)
 
 def clear_entries():
     try:
@@ -327,23 +814,26 @@ def clear_entries():
             height_entry.delete(0, tk.END)
             age_entry.delete(0, tk.END)
             name_entry.delete(0, tk.END)
-            result_label.config(text="", fg="black")
+            result_label.config(text="", foreground="black")
     except Exception as e:
         # Handle the exception gracefully
         messagebox.showerror("Error", f"An error occurred: {e}")
 
 def toggle_expectant_check(*args):
     if gender_var.get() == "Female":
-        expectant_check.config(state="normal")
+        try:
+            expectant_check.state(["!disabled"])
+        except Exception:
+            expectant_check.config(state="normal")
     else:
-        expectant_check.config(state="disabled")
+        try:
+            expectant_check.state(["disabled"])
+        except Exception:
+            expectant_check.config(state="disabled")
         expectant_var.set(0)
 
 def change_theme(theme):
-    if theme == "Default":
-        apply_theme(DEFAULT_THEME)
-    elif theme == "Alternate":
-        apply_theme(ALTERNATE_THEME)
+    apply_theme(theme)
 
 def export_report():
     try:
@@ -352,9 +842,16 @@ def export_report():
             messagebox.showerror("Error", "Please enter your name.")
             return
 
-        weight = float(weight_entry.get())
-        height = float(height_entry.get())
-        age = int(age_entry.get())
+        weight_str = weight_entry.get()
+        height_str = height_entry.get()
+        age_str = age_entry.get()
+
+        if not validate_input(weight_str, height_str, age_str):
+            return
+
+        weight = float(weight_str)
+        height = float(height_str)
+        age = int(age_str)
         gender = gender_var.get()
 
         bmi = calculate_bmi(weight, height)
@@ -376,33 +873,153 @@ def export_report():
                     pdf = FPDF(orientation='L', unit='mm', format='A4')
     
                     # Add a page
-                    pdf.add_page()
-    
+                    pdf.set_auto_page_break(auto=True, margin=12)
+
                     # Set font
                     pdf.set_font("Arial", size=12)
-    
-                    # Define cell widths based on the landscape orientation
-                    cell_width = pdf.w / 1.5
-                    
-                    # Add content to the PDF
-                    pdf.cell(cell_width, 10, txt='BMI Report', ln=True, align='C')
-                    pdf.cell(cell_width, 10, txt='', ln=True)  # Empty line for spacing
-                    pdf.cell(cell_width, 10, txt=f'Name: {name}', ln=True)
-                    pdf.cell(cell_width, 10, txt=f'Weight: {weight} kg', ln=True)
-                    pdf.cell(cell_width, 10, txt=f'Height: {height} m', ln=True)
-                    pdf.cell(cell_width, 10, txt=f'Age: {age}', ln=True)
-                    pdf.cell(cell_width, 10, txt=f'Gender: {gender}', ln=True)
-                    pdf.cell(cell_width, 10, txt=f'BMI: {bmi:.2f}', ln=True)
-                    pdf.cell(cell_width, 10, txt=f'Weight Status: {status}', ln=True)
-        
-                    # Multicell for advice section
-                    pdf.multi_cell(cell_width, 10, txt=f'Diet Advice: {advice}')
-        
-                    # Multicell for plan section
-                    pdf.multi_cell(cell_width, 10, txt=f'Exercise Plan: {plan}')
-        
-                    # Save and show success message
-                    pdf.output(export_file)
+
+                    # Title page with summary
+                    pdf.add_page()
+                    pdf.set_font("Arial", 'B', 16)
+                    pdf.cell(0, 10, 'BMI Report', ln=True, align='C')
+                    pdf.ln(4)
+                    pdf.set_font("Arial", size=12)
+
+                    def _s(text):
+                        # sanitize text for latin-1 PDF output
+                        if text is None:
+                            return ''
+                        # common replacements
+                        replacements = {
+                            '\u2014': '-', '\u2013': '-', '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"', '\u2026': '...', '\u00A0': ' '
+                        }
+                        for k, v in replacements.items():
+                            text = text.replace(k, v)
+                        text = unicodedata.normalize('NFKD', str(text))
+                        try:
+                            text.encode('latin-1')
+                            return text
+                        except UnicodeEncodeError:
+                            return text.encode('latin-1', 'replace').decode('latin-1')
+
+                    pdf.cell(0, 8, _s(f'Name: {name}'), ln=True)
+                    pdf.cell(0, 8, _s(f'Weight: {weight} kg'), ln=True)
+                    pdf.cell(0, 8, _s(f'Height: {height} m'), ln=True)
+                    pdf.cell(0, 8, _s(f'Age: {age}'), ln=True)
+                    pdf.cell(0, 8, _s(f'Gender: {gender}'), ln=True)
+                    pdf.cell(0, 8, _s(f'BMI: {bmi:.2f}'), ln=True)
+                    pdf.cell(0, 8, _s(f'Weight Status: {status}'), ln=True)
+                    pdf.ln(6)
+
+                    # Detailed advice and plan
+                    pdf.set_font("Arial", 'B', 12)
+                    pdf.cell(0, 8, 'Detailed Advice:', ln=True)
+                    pdf.set_font("Arial", size=11)
+                    txt_advice = globals().get('last_advice_text') or advice
+                    # sanitize detailed advice
+                    try:
+                        txt_advice = unicodedata.normalize('NFKD', str(txt_advice))
+                    except Exception:
+                        txt_advice = str(txt_advice)
+                    replacements = {'\u2014': '-', '\u2013': '-', '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"', '\u2026': '...', '\u00A0': ' '}
+                    for k, v in replacements.items():
+                        txt_advice = txt_advice.replace(k, v)
+                    try:
+                        txt_advice.encode('latin-1')
+                    except UnicodeEncodeError:
+                        txt_advice = txt_advice.encode('latin-1', 'replace').decode('latin-1')
+                    pdf.multi_cell(0, 6, txt=txt_advice)
+
+                    # Generate and include plots (trend + BMI categories)
+                    tmp_files = []
+                    try:
+                        # Trend image for this profile
+                        def _generate_trend_image(pname):
+                            profiles_local = load_profiles_file()
+                            profile_local = profiles_local.get(pname)
+                            if not profile_local:
+                                return None
+                            history = profile_local.get('history', [])
+                            if not history:
+                                return None
+                            def _get_ts(h):
+                                return h.get('timestamp') or h.get('date')
+
+                            hist_sorted = sorted(history, key=lambda x: _get_ts(x) or '')
+                            dates = []
+                            weights = []
+                            bmis = []
+                            for h in hist_sorted:
+                                ts = _get_ts(h)
+                                if not ts:
+                                    continue
+                                try:
+                                    dt = datetime.fromisoformat(ts)
+                                except Exception:
+                                    continue
+                                dates.append(dt)
+                                weights.append(h.get('weight', 0))
+                                bmis.append(h.get('bmi', 0))
+                            if not dates:
+                                return None
+                            fig = Figure(figsize=(10, 4), dpi=150)
+                            ax1 = fig.add_subplot(111)
+                            ax1.plot(dates, weights, 'o-', label='Weight (kg)')
+                            ax1.set_ylabel('Weight (kg)')
+                            ax2 = ax1.twinx()
+                            ax2.plot(dates, bmis, 's-', color='orange', label='BMI')
+                            ax2.set_ylabel('BMI')
+                            ax1.set_xlabel('Date')
+                            ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+                            fig.autofmt_xdate()
+                            lines1, labels1 = ax1.get_legend_handles_labels()
+                            lines2, labels2 = ax2.get_legend_handles_labels()
+                            ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+                            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                            fig.savefig(tmp.name, bbox_inches='tight')
+                            tmp.close()
+                            return tmp.name
+
+                        def _generate_bmi_categories_image(user_bmi_val):
+                            fig = Figure(figsize=(8, 3), dpi=150)
+                            ax = fig.add_subplot(111)
+                            bars = ax.bar(list(BMI_CATEGORIES.keys()), BMI_VALUES, color=BMI_COLORS)
+                            ax.plot([-0.5, len(list(BMI_CATEGORIES.keys())) - 0.5], [user_bmi_val, user_bmi_val], color='blue', linestyle='--', label='Your BMI')
+                            ax.set_xlabel('BMI Categories')
+                            ax.set_ylabel('BMI Value')
+                            ax.set_title('BMI Categories')
+                            ax.grid(True)
+                            ax.legend()
+                            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                            fig.savefig(tmp.name, bbox_inches='tight')
+                            tmp.close()
+                            return tmp.name
+
+                        trend_img = _generate_trend_image(name)
+                        if trend_img:
+                            tmp_files.append(trend_img)
+                            pdf.add_page()
+                            pdf.set_font('Arial', 'B', 12)
+                            pdf.cell(0, 8, 'Trend: Weight and BMI over time', ln=True)
+                            pdf.image(trend_img, x=10, y=30, w=pdf.w - 20)
+
+                        bmi_img = _generate_bmi_categories_image(bmi)
+                        if bmi_img:
+                            tmp_files.append(bmi_img)
+                            pdf.add_page()
+                            pdf.set_font('Arial', 'B', 12)
+                            pdf.cell(0, 8, 'BMI Categories (with your BMI)', ln=True)
+                            pdf.image(bmi_img, x=10, y=30, w=pdf.w - 20)
+
+                    finally:
+                        # Save PDF first, then attempt to clean up temp files
+                        pdf.output(export_file)
+                        for tf in tmp_files:
+                            try:
+                                os.remove(tf)
+                            except Exception:
+                                pass
+
                     messagebox.showinfo("Success", f"Report exported successfully as {export_file}")
 
                 elif export_file.endswith('.csv'):
@@ -427,70 +1044,625 @@ def export_report():
     except ValueError:
         messagebox.showerror("Error", "Invalid input. Please enter numerical values for weight, height, and age.")
 
-# Create the main window
-root = tk.Tk()
-root.title("Personal Health Assistant")
+
+def add_history_entry(name, weight, height, bmi):
+    """Append a timestamped measurement to the named profile's history (creates profile if missing)."""
+    try:
+        if not name:
+            return
+        profiles = load_profiles_file()
+        profile = profiles.get(name, {})
+        history = profile.get('history', [])
+        history.append({'timestamp': datetime.utcnow().isoformat(), 'weight': float(weight), 'height': float(height), 'bmi': float(bmi)})
+        # Ensure core fields exist
+        profile.update({
+            'name': name,
+            'weight': str(weight),
+            'height': str(height),
+            'age': profile.get('age', ''),
+            'gender': profile.get('gender', 'Male'),
+            'bodybuilder': profile.get('bodybuilder', 0),
+            'expectant': profile.get('expectant', 0),
+            'history': history,
+            'saved_at': datetime.utcnow().isoformat()
+        })
+        profiles[name] = profile
+        save_profiles_file(profiles)
+        update_profiles_view()
+    except Exception:
+        pass
+
+
+def plot_profile_history(profile_name):
+    """Plot stored weight and BMI over time for a given profile."""
+    try:
+        profiles = load_profiles_file()
+        profile = profiles.get(profile_name)
+        if not profile:
+            messagebox.showerror('Error', f'Profile "{profile_name}" not found.')
+            return
+        history = profile.get('history', [])
+        if not history:
+            messagebox.showinfo('No Data', f'No history for profile "{profile_name}".')
+            return
+
+        def _get_ts(h):
+            return h.get('timestamp') or h.get('date')
+
+        # Sort by timestamp/date and ignore invalid records
+        history_sorted = sorted(history, key=lambda x: _get_ts(x) or '')
+        dates = []
+        weights = []
+        bmis = []
+        for h in history_sorted:
+            ts = _get_ts(h)
+            if not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts)
+            except Exception:
+                continue
+            dates.append(dt)
+            weights.append(h.get('weight', 0))
+            bmis.append(h.get('bmi', 0))
+        if not dates:
+            messagebox.showinfo('No Data', f'No valid timestamps for profile "{profile_name}".')
+            return
+
+        plt.close('all')
+        fig = Figure(figsize=(6, 4), dpi=100)
+        ax1 = fig.add_subplot(111)
+        ax1.plot(dates, weights, 'o-', label='Weight (kg)')
+        ax1.set_ylabel('Weight (kg)')
+        ax2 = ax1.twinx()
+        ax2.plot(dates, bmis, 's-', color='orange', label='BMI')
+        ax2.set_ylabel('BMI')
+        ax1.set_xlabel('Date')
+        fig.autofmt_xdate()
+        # Legends
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+
+        # Embed in existing plot_frame
+        global plot_canvas, plot_frame, plot_toolbar
+        try:
+            if plot_canvas:
+                plot_canvas.get_tk_widget().destroy()
+        except Exception:
+            pass
+
+        try:
+            if plot_toolbar:
+                plot_toolbar.destroy()
+        except Exception:
+            pass
+
+        plot_canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+        plot_canvas.draw()
+        plot_widget = plot_canvas.get_tk_widget()
+        plot_widget.pack(fill='both', expand=True)
+
+        # Add toolbar for basic interactivity
+        try:
+            plot_toolbar = NavigationToolbar2Tk(plot_canvas, plot_frame)
+            plot_toolbar.update()
+            plot_toolbar.pack(side='bottom', fill='x')
+        except Exception:
+            pass
+
+    except Exception as e:
+        messagebox.showerror('Error', f'Failed to plot history: {e}')
+
+
+def _compute_linear_slope(history, key):
+    """Compute slope (units per day) for a numeric key in history list using simple linear regression."""
+    try:
+        if not history or len(history) < 2:
+            return None
+        xs = []
+        ys = []
+        for h in history:
+            ts = h.get('timestamp') or h.get('date')
+            if not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts)
+            except Exception:
+                continue
+            xs.append(dt.timestamp() / 86400.0)  # days
+            ys.append(float(h.get(key, 0)))
+        if len(xs) < 2:
+            return None
+        x_mean = sum(xs) / len(xs)
+        y_mean = sum(ys) / len(ys)
+        num = sum((xi - x_mean) * (yi - y_mean) for xi, yi in zip(xs, ys))
+        den = sum((xi - x_mean) ** 2 for xi in xs)
+        if den == 0:
+            return None
+        slope = num / den  # units per day
+        return slope
+    except Exception:
+        return None
+
+
+def estimate_eta_for_profile(profile_name, goal_weight=None, goal_bmi=None):
+    """Estimate ETA (in days) to reach a goal using linear trend from history.
+
+    Returns (eta_days, weekly_target) or (None, None) if cannot estimate.
+    """
+    try:
+        profiles = load_profiles_file()
+        profile = profiles.get(profile_name)
+        if not profile:
+            return None, None
+        history = profile.get('history', [])
+        if not history or len(history) < 2:
+            return None, None
+
+        # Use weight trend if goal_weight provided, otherwise BMI if goal_bmi provided
+        if goal_weight is not None:
+            slope = _compute_linear_slope(history, 'weight')
+            current = float(history[-1].get('weight', 0))
+            target = float(goal_weight)
+        elif goal_bmi is not None:
+            slope = _compute_linear_slope(history, 'bmi')
+            current = float(history[-1].get('bmi', 0))
+            target = float(goal_bmi)
+        else:
+            return None, None
+
+        if slope is None or slope == 0:
+            return None, None
+
+        # days needed (target - current) / slope
+        days = (target - current) / slope
+        # If slope moves away from target (days negative), return None
+        if days < 0:
+            return None, None
+
+        # weekly target (kg/week or bmi/week)
+        weekly_target = (target - current) / (days / 7.0) if days != 0 else None
+        return int(days), weekly_target
+    except Exception:
+        return None, None
+
+
+def set_goal_for_selected():
+    name = name_entry.get().strip()
+    if not name:
+        sel = profiles_tree.focus()
+        if not sel:
+            selection = profiles_tree.selection()
+            if selection:
+                sel = selection[0]
+        if not sel:
+            messagebox.showerror('Error', 'No profile selected or name entered.')
+            return
+        name = sel
+
+    try:
+        gw = goal_weight_entry.get().strip()
+        gb = goal_bmi_entry.get().strip()
+        profiles = load_profiles_file()
+        profile = profiles.get(name, {})
+        goal = profile.get('goal', {})
+        if gw:
+            goal['weight'] = float(gw)
+        if gb:
+            goal['bmi'] = float(gb)
+        goal['set_at'] = datetime.utcnow().isoformat()
+        profile['goal'] = goal
+        profiles[name] = profile
+        save_profiles_file(profiles)
+        update_profiles_view()
+        messagebox.showinfo('Saved', f'Goal saved for profile "{name}".')
+    except Exception as e:
+        messagebox.showerror('Error', f'Failed to save goal: {e}')
+
+
+def show_eta_for_selected():
+    sel = profiles_tree.focus()
+    if not sel:
+        selection = profiles_tree.selection()
+        if selection:
+            sel = selection[0]
+    name = sel or name_entry.get().strip()
+    if not name:
+        messagebox.showerror('Error', 'No profile selected or name entered.')
+        return
+
+    profiles = load_profiles_file()
+    profile = profiles.get(name)
+    if not profile:
+        messagebox.showerror('Error', f'Profile "{name}" not found.')
+        return
+
+    goal = profile.get('goal', {})
+    gw = goal.get('weight')
+    gb = goal.get('bmi')
+    if gw is None and gb is None:
+        messagebox.showinfo('No Goal', 'No goal set for this profile. Use the goal fields and click Save Goal.')
+        return
+
+    days, weekly = estimate_eta_for_profile(name, goal_weight=gw, goal_bmi=gb)
+    if days is None:
+        messagebox.showinfo('Unable to estimate', 'Insufficient history or no clear trend to estimate ETA.')
+        return
+
+    weeks = days / 7.0
+    parts = []
+    if gw is not None:
+        parts.append(f"Target weight: {gw} kg")
+    if gb is not None:
+        parts.append(f"Target BMI: {gb}")
+    parts.append(f"Estimated time: {days} days (~{weeks:.1f} weeks)")
+    if weekly is not None:
+        parts.append(f"Required weekly change: {weekly:.2f} per week")
+
+    messagebox.showinfo('ETA & Targets', '\n'.join(parts))
+
+
+def generate_goal_plan(profile_name, weeks=12):
+    """Generate a week-by-week micro-plan to reach the saved goal for a profile.
+
+    Returns a formatted string describing weekly targets, estimated daily calorie change,
+    and sample action items (meals/exercise).
+    """
+    try:
+        profiles = load_profiles_file()
+        profile = profiles.get(profile_name)
+        if not profile:
+            return ''
+        goal = profile.get('goal', {})
+        if not goal:
+            return ''
+
+        history = profile.get('history', [])
+        # Determine current baseline value
+        if history:
+            last = history[-1]
+            current_weight = float(last.get('weight', profile.get('weight') or 0))
+            current_bmi = float(last.get('bmi', 0))
+        else:
+            try:
+                current_weight = float(profile.get('weight') or 0)
+            except Exception:
+                current_weight = 0
+            try:
+                current_bmi = float(profile.get('bmi') or 0)
+            except Exception:
+                current_bmi = 0
+
+        gw = goal.get('weight')
+        gb = goal.get('bmi')
+
+        # Prefer weight-based plan if weight goal present
+        if gw is not None:
+            # Estimate weekly change required using ETA estimator
+            days, weekly_required = estimate_eta_for_profile(profile_name, goal_weight=gw)
+            metric = 'weight'
+            current = current_weight
+            target = float(gw)
+        elif gb is not None:
+            days, weekly_required = estimate_eta_for_profile(profile_name, goal_bmi=gb)
+            metric = 'bmi'
+            current = current_bmi
+            target = float(gb)
+        else:
+            return ''
+
+        if weekly_required is None:
+            return 'Insufficient history or unclear trend to generate a goal plan.'
+
+        # Compute daily calorie change estimate: 1 kg fat ~ 7700 kcal
+        # weekly_required is units/week; map to kcal/week and kcal/day
+        kcal_per_unit = 7700.0 if metric == 'weight' else 0.0
+        kcal_week = weekly_required * kcal_per_unit
+        kcal_day = kcal_week / 7.0 if kcal_week else 0.0
+
+        lines = []
+        lines.append(f"Current {metric}: {current:.2f}")
+        lines.append(f"Target {metric}: {target:.2f}")
+        lines.append(f"Required weekly change: {weekly_required:.2f} {metric}/week")
+        if kcal_week:
+            sign = 'increase' if kcal_week > 0 else 'decrease'
+            lines.append(f"Approx. calories to {sign} per day: {abs(kcal_day):.0f} kcal/day (≈ {abs(kcal_week):.0f} kcal/week)")
+
+        lines.append('')
+        lines.append('12-week micro-plan (weekly target):')
+        # Populate week-by-week targets
+        for w in range(1, weeks + 1):
+            expected = current + weekly_required * w
+            lines.append(f" Week {w:2d}: target {metric} ≈ {expected:.2f}")
+
+        lines.append('')
+        lines.append('Actionable recommendations:')
+        # Calorie / macronutrient suggestions
+        if metric == 'weight':
+            if weekly_required < 0:
+                lines.append('- Focus on a moderate calorie deficit while keeping protein high to preserve muscle.')
+                lines.append('- Protein target: 1.2–1.6 g/kg bodyweight per day; prioritize lean proteins.')
+                lines.append('- Sample: breakfast - Greek yogurt + oats; lunch - salad with grilled chicken/tempeh; dinner - fish/beans + veg.')
+            else:
+                lines.append('- To gain weight, add a controlled calorie surplus with nutrient-dense foods.')
+                lines.append('- Aim for 1.2–1.8 g/kg protein per day and add 1–2 calorie-dense snacks (nuts, smoothies).')
+                lines.append('- Sample: breakfast - oatmeal with nut butter and banana; snack - smoothie with milk+protein powder; dinner - rice + chicken/tofu.')
+
+        # Exercise suggestions
+        lines.append('- Aim for 2–3 strength sessions per week and 2–3 moderate cardio sessions.')
+        lines.append('- Prioritize progressive overload for muscle maintenance/growth; add low-impact cardio for fat loss.')
+
+        # Weekly checklist
+        lines.append('')
+        lines.append('Weekly checklist:')
+        lines.append('- Track weight once per week at the same time of day.')
+        lines.append('- Prepare 2–3 meals in advance (meal prep).')
+        lines.append('- Complete at least one strength session and two shorter activity sessions.')
+
+        return '\n'.join(lines)
+    except Exception:
+        return ''
+
+
+def show_trend_for_selected():
+    sel = profiles_tree.focus()
+    if not sel:
+        selection = profiles_tree.selection()
+        if selection:
+            sel = selection[0]
+    if sel:
+        plot_profile_history(sel)
+    else:
+        name = name_entry.get().strip()
+        if name:
+            plot_profile_history(name)
+        else:
+            messagebox.showerror('Error', 'No profile selected or name entered.')
+
+# Create the main window (use ttkbootstrap if available)
+if USE_TTB and _style is not None:
+    root = _style.master
+    root.title("Personal Health Assistant")
+else:
+    root = tk.Tk()
+    root.title("Personal Health Assistant")
 window_width = 800
 window_height = 800
 screen_width = root.winfo_screenwidth()
 screen_height = root.winfo_screenheight()
 x_coordinate = int((screen_width / 2) - (window_width / 2))
 y_coordinate = int((screen_height / 2) - (window_height / 2))
-root.geometry(f"{window_width}x{window_height}+{x_coordinate}+{y_coordinate}")
+# Open fullscreen / maximized by default. On Windows use 'zoomed', otherwise try fullscreen attribute.
+try:
+    root.state('zoomed')
+except Exception:
+    try:
+        root.attributes('-fullscreen', True)
+    except Exception:
+        root.geometry(f"{window_width}x{window_height}+{x_coordinate}+{y_coordinate}")
 
-# Create labels
-tk.Label(root, text="Name:", font=("Arial", 12)).place(relx=0.3, rely=0.05, anchor='center')
-tk.Label(root, text="Mass (kg):", font=("Arial", 12)).place(relx=0.3, rely=0.1, anchor='center')
-tk.Label(root, text="Height (m):", font=("Arial", 12)).place(relx=0.3, rely=0.15, anchor='center')
-tk.Label(root, text="Age:", font=("Arial", 12)).place(relx=0.3, rely=0.2, anchor='center')
-tk.Label(root, text="Gender:", font=("Arial", 12)).place(relx=0.3, rely=0.25, anchor='center')
+# Create a modern, responsive layout using frames and grid
+label_font = ("Segoe UI", 11)
+entry_font = ("Segoe UI", 11)
 
-# Create entry fields
-name_entry = tk.Entry(root, font=("Arial", 12))
-name_entry.place(relx=0.5, rely=0.05, anchor='center')
-weight_entry = tk.Entry(root, font=("Arial", 12))
-weight_entry.place(relx=0.5, rely=0.1, anchor='center')
-height_entry = tk.Entry(root, font=("Arial", 12))
-height_entry.place(relx=0.5, rely=0.15, anchor='center')
-age_entry = tk.Entry(root, font=("Arial", 12))
-age_entry.place(relx=0.5, rely=0.2, anchor='center')
+# Modernize styles: use ttkbootstrap when available, otherwise tweak ttk styles
+style = ttk.Style()
+try:
+    style.configure('TButton', padding=8, relief='flat', font=entry_font)
+    style.configure('TLabel', font=label_font)
+    style.configure('TEntry', padding=4)
+    style.configure('Card.TLabelframe', background=DEFAULT_THEME['bg'], borderwidth=0, relief='flat', padding=10)
+    style.configure('Card.TLabelframe.Label', font=label_font)
+except Exception:
+    pass
 
-# Gender dropdown menu
-gender_var = tk.StringVar(root)
-gender_var.set("Male")  # Default selection
-gender_menu = tk.OptionMenu(root, gender_var, "Male", "Female", command=toggle_expectant_check)
-gender_menu.place(relx=0.5, rely=0.25, anchor='center')
+def make_button(parent, text, command=None):
+    """Create a modern-looking button; prefer ttkbootstrap if available."""
+    if USE_TTB:
+        try:
+            return tb.Button(parent, text=text, bootstyle='primary', command=command)
+        except Exception:
+            return ttk.Button(parent, text=text, command=command)
+    else:
+        return ttk.Button(parent, text=text, command=command)
 
-# Checkbox for expectant mothers
+# top-level container
+main_frame = ttk.Frame(root, padding=12)
+main_frame.pack(fill='both', expand=True)
+
+# Left: input / actions
+left_frame = ttk.LabelFrame(main_frame, text='Input', padding=10, style='Card.TLabelframe')
+left_frame.grid(row=0, column=0, sticky='nsew', padx=(0, 8), pady=(0, 8))
+
+# Right: profiles
+right_frame = ttk.LabelFrame(main_frame, text='Profiles', padding=10, style='Card.TLabelframe')
+right_frame.grid(row=0, column=1, sticky='nsew', padx=(8, 0), pady=(0, 8))
+
+# Bottom: results / plot
+bottom_frame = ttk.LabelFrame(main_frame, text='Results', padding=10, style='Card.TLabelframe')
+bottom_frame.grid(row=1, column=0, columnspan=2, sticky='nsew')
+
+main_frame.columnconfigure(0, weight=1)
+main_frame.columnconfigure(1, weight=0)
+main_frame.rowconfigure(1, weight=1)
+
+# Input widgets in left_frame using grid
+ttk.Label(left_frame, text='Name:', font=label_font).grid(row=0, column=0, sticky='w')
+name_entry = ttk.Entry(left_frame, font=entry_font)
+name_entry.grid(row=0, column=1, sticky='ew', padx=6, pady=2)
+
+ttk.Label(left_frame, text='Mass (kg):', font=label_font).grid(row=1, column=0, sticky='w')
+weight_entry = ttk.Entry(left_frame, font=entry_font)
+weight_entry.grid(row=1, column=1, sticky='ew', padx=6, pady=2)
+
+ttk.Label(left_frame, text='Height (m):', font=label_font).grid(row=2, column=0, sticky='w')
+height_entry = ttk.Entry(left_frame, font=entry_font)
+height_entry.grid(row=2, column=1, sticky='ew', padx=6, pady=2)
+
+ttk.Label(left_frame, text='Age:', font=label_font).grid(row=3, column=0, sticky='w')
+age_entry = ttk.Entry(left_frame, font=entry_font)
+age_entry.grid(row=3, column=1, sticky='ew', padx=6, pady=2)
+
+ttk.Label(left_frame, text='Gender:', font=label_font).grid(row=4, column=0, sticky='w')
+gender_var = tk.StringVar(left_frame)
+gender_var.set('Male')
+gender_menu = ttk.Combobox(left_frame, textvariable=gender_var, values=('Male', 'Female'), state='readonly', font=entry_font)
+gender_menu.grid(row=4, column=1, sticky='ew', padx=6, pady=2)
+gender_menu.bind('<<ComboboxSelected>>', lambda e: toggle_expectant_check())
+
 expectant_var = tk.IntVar()
-expectant_check = tk.Checkbutton(root, text="Expectant Mother", variable=expectant_var, state="disabled")
-expectant_check.place(relx=0.5, rely=0.3, anchor='center')
+expectant_check = ttk.Checkbutton(left_frame, text='Expectant Mother', variable=expectant_var)
+expectant_check.state(['disabled']) if gender_var.get() != 'Female' else None
+expectant_check.grid(row=5, column=0, columnspan=2, sticky='w', pady=(4, 2))
 
-# Checkbox for bodybuilders
 bodybuilder_var = tk.IntVar()
-bodybuilder_check = tk.Checkbutton(root, text="Bodybuilder", variable=bodybuilder_var)
-bodybuilder_check.place(relx=0.5, rely=0.35, anchor='center')
+bodybuilder_check = ttk.Checkbutton(left_frame, text='Bodybuilder', variable=bodybuilder_var)
+bodybuilder_check.grid(row=6, column=0, columnspan=2, sticky='w', pady=(0, 6))
 
-# Create the calculate, clear, and export buttons
-calculate_button = tk.Button(root, text="Calculate BMI", command=calculate_and_show_bmi, font=("Arial", 12))
-calculate_button.place(relx=0.3, rely=0.4, anchor='center')
-clear_button = tk.Button(root, text="Clear", command=clear_entries, font=("Arial", 12))
-clear_button.place(relx=0.5, rely=0.4, anchor='center')
-export_button = tk.Button(root, text="Export Report", command=export_report, font=("Arial", 12))
-export_button.place(relx=0.7, rely=0.4, anchor='center')
+# Goal inputs
+ttk.Label(left_frame, text='Goal Weight (kg):', font=label_font).grid(row=7, column=0, sticky='w')
+goal_weight_entry = ttk.Entry(left_frame, font=entry_font)
+goal_weight_entry.grid(row=7, column=1, sticky='ew', padx=6, pady=2)
 
-# Result label
-result_label = tk.Label(root, text="", wraplength=400)
-result_label.place(relx=0.5, rely=0.7, anchor='center')
+ttk.Label(left_frame, text='Goal BMI:', font=label_font).grid(row=8, column=0, sticky='w')
+goal_bmi_entry = ttk.Entry(left_frame, font=entry_font)
+goal_bmi_entry.grid(row=8, column=1, sticky='ew', padx=6, pady=2)
 
-# Create a dropdown menu for changing theme
+left_frame.columnconfigure(1, weight=1)
+
+# Buttons in left_frame
+btn_frame = ttk.Frame(left_frame)
+btn_frame.grid(row=10, column=0, columnspan=2, pady=6)
+calculate_button = make_button(btn_frame, text='Calculate BMI', command=calculate_and_show_bmi)
+calculate_button.grid(row=0, column=0, padx=6, pady=2)
+clear_button = make_button(btn_frame, text='Clear', command=clear_entries)
+clear_button.grid(row=0, column=1, padx=6, pady=2)
+export_button = make_button(btn_frame, text='Export Report', command=export_report)
+export_button.grid(row=0, column=2, padx=6, pady=2)
+# Detailed advice viewer button
+def show_detailed_advice():
+    try:
+        text = last_advice_text
+    except Exception:
+        text = ''
+    if not text:
+        messagebox.showinfo('No Advice', 'No detailed advice available. Calculate BMI first.')
+        return
+
+    # Toplevel window with scrollable Text widget
+    top = tk.Toplevel(root)
+    top.title('Detailed Advice')
+    top.geometry('700x500')
+    txt = tk.Text(top, wrap='word', padx=8, pady=8)
+    scr = ttk.Scrollbar(top, orient='vertical', command=txt.yview)
+    txt.configure(yscrollcommand=scr.set)
+    txt.insert('1.0', text)
+    txt.config(state='disabled')
+    txt.pack(side='left', fill='both', expand=True)
+    scr.pack(side='right', fill='y')
+
+def show_history():
+    name = name_entry.get().strip()
+    if not name:
+        messagebox.showinfo('No Name', 'Please enter a name to view history.')
+        return
+    try:
+        profiles = load_profiles_file()
+        profile = profiles.get(name, {})
+        history = profile.get('history', [])
+        if not history:
+            messagebox.showinfo('No History', f'No history found for {name}.')
+            return
+        text = f"History for {name}:\n\n"
+        for entry in history:
+            text += f"Date: {entry.get('date', 'Unknown')}\n"
+            text += f"Weight: {entry.get('weight', 'Unknown')} kg, Height: {entry.get('height', 'Unknown')} m, BMI: {entry.get('bmi', 'Unknown')}\n"
+            text += f"Category: {entry.get('category', 'Unknown')}, Gender: {entry.get('gender', 'Unknown')}, Age: {entry.get('age', 'Unknown')}\n"
+            text += f"Bodybuilder: {'Yes' if entry.get('bodybuilder', False) else 'No'}, Expectant: {'Yes' if entry.get('expectant', False) else 'No'}\n\n"
+    except Exception as e:
+        text = f"Error loading history: {e}"
+
+    # Toplevel window with scrollable Text widget
+    top = tk.Toplevel(root)
+    top.title('History')
+    top.geometry('700x500')
+    txt = tk.Text(top, wrap='word', padx=8, pady=8)
+    scr = ttk.Scrollbar(top, orient='vertical', command=txt.yview)
+    txt.configure(yscrollcommand=scr.set)
+    txt.insert('1.0', text)
+    txt.config(state='disabled')
+    txt.pack(side='left', fill='both', expand=True)
+    scr.pack(side='right', fill='y')
+
+detailed_button = make_button(btn_frame, text='Detailed Advice', command=show_detailed_advice)
+detailed_button.grid(row=0, column=3, padx=6, pady=2)
+
+history_button = make_button(btn_frame, text='View History', command=show_history)
+history_button.grid(row=0, column=4, padx=6, pady=2)
+
+# Profiles in right_frame
+profiles_frame = ttk.Frame(right_frame)
+profiles_frame.pack(fill='both', expand=True)
+profiles_tree = ttk.Treeview(profiles_frame, columns=('name', 'saved_at'), show='headings', height=12)
+profiles_tree.heading('name', text='Name')
+profiles_tree.heading('saved_at', text='Saved At')
+profiles_tree.column('name', width=160)
+profiles_tree.column('saved_at', width=140)
+profiles_tree.pack(side='left', fill='both', expand=True)
+
+profiles_scroll = ttk.Scrollbar(profiles_frame, orient='vertical', command=profiles_tree.yview)
+profiles_tree.configure(yscrollcommand=profiles_scroll.set)
+profiles_scroll.pack(side='right', fill='y')
+
+action_frame = ttk.Frame(right_frame)
+action_frame.pack(fill='x', pady=(6, 0))
+save_profile_button = make_button(action_frame, text='Save Profile', command=save_profile)
+save_profile_button.pack(side='left', padx=6, pady=4)
+load_profile_button = make_button(action_frame, text='Load Profile', command=load_selected_profile)
+load_profile_button.pack(side='left', padx=6, pady=4)
+delete_profile_button = make_button(action_frame, text='Delete Profile', command=delete_profile)
+delete_profile_button.pack(side='left', padx=6, pady=4)
+show_trend_button = make_button(action_frame, text='Show Trend', command=show_trend_for_selected)
+show_trend_button.pack(side='left', padx=6, pady=4)
+set_goal_button = make_button(action_frame, text='Save Goal', command=lambda: set_goal_for_selected())
+set_goal_button.pack(side='left', padx=6, pady=4)
+show_eta_button = make_button(action_frame, text='Show ETA', command=lambda: show_eta_for_selected())
+show_eta_button.pack(side='left', padx=6, pady=4)
+
+profiles_tree.bind('<Double-1>', lambda e: load_selected_profile())
+update_profiles_view()
+
+# Results and embedded plot in bottom_frame
+# Create two sub-frames so results appear bottom-left and graph bottom-right
+results_frame = ttk.Frame(bottom_frame)
+results_frame.grid(row=0, column=0, sticky='nsew', padx=(4, 8), pady=4)
+plot_frame = ttk.Frame(bottom_frame)
+plot_frame.grid(row=0, column=1, sticky='nsew', padx=(8, 4), pady=4)
+
+bottom_frame.columnconfigure(0, weight=1)
+bottom_frame.columnconfigure(1, weight=1)
+bottom_frame.rowconfigure(0, weight=1)
+
+result_label = ttk.Label(results_frame, text='', wraplength=400)
+result_label.pack(fill='both', expand=True)
+
+# Theme selector
 theme_var = tk.StringVar(root)
-theme_var.set("Default")  # Default theme selected
-theme_menu = tk.OptionMenu(root, theme_var, "Default", "Alternate", command=change_theme)
-theme_menu.place(relx=0.5, rely=0.01, anchor='center')
+theme_var.set('Default')
+theme_menu = ttk.Combobox(main_frame, textvariable=theme_var, values=('Default', 'Alternate'), state='readonly', width=12)
+theme_menu.grid(row=0, column=2, sticky='ne', padx=(8,0))
+theme_menu.bind('<<ComboboxSelected>>', lambda e: change_theme(theme_var.get()))
 
 # Apply default theme initially
-apply_theme(DEFAULT_THEME)
+apply_theme('Default')
 
-# Run the main event loop
-root.mainloop()
+# keyboard shortcuts
+root.bind('<Control-s>', lambda e: save_profile())
+root.bind('<Control-l>', lambda e: load_selected_profile())
+root.bind('<Control-q>', lambda e: root.quit())
+
+if __name__ == '__main__':
+    # Run the main event loop
+    root.mainloop()
+
