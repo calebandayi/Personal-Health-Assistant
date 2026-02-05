@@ -193,8 +193,10 @@ def update_profiles_view():
         profiles = load_profiles_file()
         profiles_tree.delete(*profiles_tree.get_children())
         for name, data in profiles.items():
+            age = data.get('age', '')
+            gender = data.get('gender', '')
             ts = data.get('saved_at', '')
-            profiles_tree.insert('', 'end', iid=name, values=(name, ts))
+            profiles_tree.insert('', 'end', iid=name, values=(name, age, gender, ts))
     except Exception:
         pass
 
@@ -251,6 +253,13 @@ def load_selected_profile(event=None):
         bodybuilder_var.set(profile.get('bodybuilder', 0))
         expectant_var.set(profile.get('expectant', 0))
         toggle_expectant_check()
+        try:
+            goal_bmi_entry.delete(0, tk.END)
+            goal_bmi = profile.get('goal', {}).get('bmi', '')
+            if goal_bmi != '':
+                goal_bmi_entry.insert(0, str(goal_bmi))
+        except Exception:
+            pass
         messagebox.showinfo('Loaded', f'Profile "{profile.get("name")}" loaded.')
     except Exception as e:
         messagebox.showerror('Error', f'Failed to load profile: {e}')
@@ -653,29 +662,18 @@ def calculate_and_show_bmi():
                 
                 # Goal progress
                 if goal:
-                    current_weight = weight
                     current_bmi = bmi
-                    goal_weight = goal.get('weight')
                     goal_bmi = goal.get('bmi')
-                    
-                    if goal_weight:
-                        diff = goal_weight - current_weight
-                        if abs(diff) < 0.1:
-                            goal_message += f"🎯 Weight goal achieved! "
-                        elif diff > 0:
-                            goal_message += f"📈 {diff:.1f} kg to reach weight goal. "
-                        else:
-                            goal_message += f"⚠️ {abs(diff):.1f} kg over weight goal. "
-                    
+
                     if goal_bmi:
                         diff_bmi = goal_bmi - current_bmi
                         if abs(diff_bmi) < 0.1:
-                            goal_message += f"BMI goal achieved!"
+                            goal_message += "BMI goal achieved!"
                         elif diff_bmi > 0:
                             goal_message += f"{diff_bmi:.2f} BMI points to goal."
                         else:
                             goal_message += f"{abs(diff_bmi):.2f} BMI points over goal."
-                    
+
                     if goal_message:
                         goal_message = "Goal Progress: " + goal_message
                 
@@ -715,7 +713,16 @@ def calculate_and_show_bmi():
         try:
             name = name_entry.get().strip()
             if name:
-                add_history_entry(name, weight, height, bmi)
+                add_history_entry(
+                    name,
+                    weight,
+                    height,
+                    bmi,
+                    age=age,
+                    gender=gender,
+                    bodybuilder=is_bodybuilder,
+                    expectant=is_expectant
+                )
         except Exception:
             pass
     except Exception as e:
@@ -814,7 +821,45 @@ def clear_entries():
             height_entry.delete(0, tk.END)
             age_entry.delete(0, tk.END)
             name_entry.delete(0, tk.END)
+            try:
+                gender_var.set('Male')
+            except Exception:
+                pass
+            try:
+                bodybuilder_var.set(0)
+            except Exception:
+                pass
+            try:
+                expectant_var.set(0)
+            except Exception:
+                pass
+            try:
+                toggle_expectant_check()
+            except Exception:
+                pass
+            try:
+                profiles_tree.selection_remove(profiles_tree.selection())
+            except Exception:
+                pass
+            try:
+                goal_bmi_entry.delete(0, tk.END)
+            except Exception:
+                pass
             result_label.config(text="", foreground="black")
+            # Clear plot area too
+            try:
+                global plot_canvas, plot_toolbar
+                if plot_toolbar:
+                    plot_toolbar.destroy()
+                    plot_toolbar = None
+            except Exception:
+                pass
+            try:
+                if plot_canvas:
+                    plot_canvas.get_tk_widget().destroy()
+                    plot_canvas = None
+            except Exception:
+                pass
     except Exception as e:
         # Handle the exception gracefully
         messagebox.showerror("Error", f"An error occurred: {e}")
@@ -1045,7 +1090,7 @@ def export_report():
         messagebox.showerror("Error", "Invalid input. Please enter numerical values for weight, height, and age.")
 
 
-def add_history_entry(name, weight, height, bmi):
+def add_history_entry(name, weight, height, bmi, age=None, gender=None, bodybuilder=None, expectant=None):
     """Append a timestamped measurement to the named profile's history (creates profile if missing)."""
     try:
         if not name:
@@ -1059,10 +1104,10 @@ def add_history_entry(name, weight, height, bmi):
             'name': name,
             'weight': str(weight),
             'height': str(height),
-            'age': profile.get('age', ''),
-            'gender': profile.get('gender', 'Male'),
-            'bodybuilder': profile.get('bodybuilder', 0),
-            'expectant': profile.get('expectant', 0),
+            'age': age if age is not None else profile.get('age', ''),
+            'gender': gender if gender is not None else profile.get('gender', 'Male'),
+            'bodybuilder': bodybuilder if bodybuilder is not None else profile.get('bodybuilder', 0),
+            'expectant': expectant if expectant is not None else profile.get('expectant', 0),
             'history': history,
             'saved_at': datetime.utcnow().isoformat()
         })
@@ -1186,8 +1231,8 @@ def _compute_linear_slope(history, key):
         return None
 
 
-def estimate_eta_for_profile(profile_name, goal_weight=None, goal_bmi=None):
-    """Estimate ETA (in days) to reach a goal using linear trend from history.
+def estimate_eta_for_profile(profile_name, goal_bmi=None):
+    """Estimate ETA (in days) to reach a BMI goal using linear trend from history.
 
     Returns (eta_days, weekly_target) or (None, None) if cannot estimate.
     """
@@ -1200,17 +1245,12 @@ def estimate_eta_for_profile(profile_name, goal_weight=None, goal_bmi=None):
         if not history or len(history) < 2:
             return None, None
 
-        # Use weight trend if goal_weight provided, otherwise BMI if goal_bmi provided
-        if goal_weight is not None:
-            slope = _compute_linear_slope(history, 'weight')
-            current = float(history[-1].get('weight', 0))
-            target = float(goal_weight)
-        elif goal_bmi is not None:
-            slope = _compute_linear_slope(history, 'bmi')
-            current = float(history[-1].get('bmi', 0))
-            target = float(goal_bmi)
-        else:
+        if goal_bmi is None:
             return None, None
+
+        slope = _compute_linear_slope(history, 'bmi')
+        current = float(history[-1].get('bmi', 0))
+        target = float(goal_bmi)
 
         if slope is None or slope == 0:
             return None, None
@@ -1221,7 +1261,7 @@ def estimate_eta_for_profile(profile_name, goal_weight=None, goal_bmi=None):
         if days < 0:
             return None, None
 
-        # weekly target (kg/week or bmi/week)
+        # weekly target (bmi/week)
         weekly_target = (target - current) / (days / 7.0) if days != 0 else None
         return int(days), weekly_target
     except Exception:
@@ -1242,21 +1282,22 @@ def set_goal_for_selected():
         name = sel
 
     try:
-        gw = goal_weight_entry.get().strip()
         gb = goal_bmi_entry.get().strip()
+        if not gb:
+            messagebox.showerror('Error', 'Please enter a goal BMI.')
+            return
         profiles = load_profiles_file()
         profile = profiles.get(name, {})
         goal = profile.get('goal', {})
-        if gw:
-            goal['weight'] = float(gw)
-        if gb:
-            goal['bmi'] = float(gb)
+        goal['bmi'] = float(gb)
+        # Remove any legacy weight goal to keep BMI-only goals
+        goal.pop('weight', None)
         goal['set_at'] = datetime.utcnow().isoformat()
         profile['goal'] = goal
         profiles[name] = profile
         save_profiles_file(profiles)
         update_profiles_view()
-        messagebox.showinfo('Saved', f'Goal saved for profile "{name}".')
+        messagebox.showinfo('Saved', f'Goal BMI saved for profile "{name}".')
     except Exception as e:
         messagebox.showerror('Error', f'Failed to save goal: {e}')
 
@@ -1279,23 +1320,19 @@ def show_eta_for_selected():
         return
 
     goal = profile.get('goal', {})
-    gw = goal.get('weight')
     gb = goal.get('bmi')
-    if gw is None and gb is None:
-        messagebox.showinfo('No Goal', 'No goal set for this profile. Use the goal fields and click Save Goal.')
+    if gb is None:
+        messagebox.showinfo('No Goal', 'No BMI goal set for this profile. Enter a Goal BMI and click Save Goal.')
         return
 
-    days, weekly = estimate_eta_for_profile(name, goal_weight=gw, goal_bmi=gb)
+    days, weekly = estimate_eta_for_profile(name, goal_bmi=gb)
     if days is None:
         messagebox.showinfo('Unable to estimate', 'Insufficient history or no clear trend to estimate ETA.')
         return
 
     weeks = days / 7.0
     parts = []
-    if gw is not None:
-        parts.append(f"Target weight: {gw} kg")
-    if gb is not None:
-        parts.append(f"Target BMI: {gb}")
+    parts.append(f"Target BMI: {gb}")
     parts.append(f"Estimated time: {days} days (~{weeks:.1f} weeks)")
     if weekly is not None:
         parts.append(f"Required weekly change: {weekly:.2f} per week")
@@ -1304,10 +1341,9 @@ def show_eta_for_selected():
 
 
 def generate_goal_plan(profile_name, weeks=12):
-    """Generate a week-by-week micro-plan to reach the saved goal for a profile.
+    """Generate a week-by-week micro-plan to reach the saved BMI goal for a profile.
 
-    Returns a formatted string describing weekly targets, estimated daily calorie change,
-    and sample action items (meals/exercise).
+    Returns a formatted string describing weekly targets and sample action items.
     """
     try:
         profiles = load_profiles_file()
@@ -1322,82 +1358,44 @@ def generate_goal_plan(profile_name, weeks=12):
         # Determine current baseline value
         if history:
             last = history[-1]
-            current_weight = float(last.get('weight', profile.get('weight') or 0))
             current_bmi = float(last.get('bmi', 0))
         else:
-            try:
-                current_weight = float(profile.get('weight') or 0)
-            except Exception:
-                current_weight = 0
             try:
                 current_bmi = float(profile.get('bmi') or 0)
             except Exception:
                 current_bmi = 0
 
-        gw = goal.get('weight')
         gb = goal.get('bmi')
-
-        # Prefer weight-based plan if weight goal present
-        if gw is not None:
-            # Estimate weekly change required using ETA estimator
-            days, weekly_required = estimate_eta_for_profile(profile_name, goal_weight=gw)
-            metric = 'weight'
-            current = current_weight
-            target = float(gw)
-        elif gb is not None:
-            days, weekly_required = estimate_eta_for_profile(profile_name, goal_bmi=gb)
-            metric = 'bmi'
-            current = current_bmi
-            target = float(gb)
-        else:
+        if gb is None:
             return ''
+
+        days, weekly_required = estimate_eta_for_profile(profile_name, goal_bmi=gb)
+        current = current_bmi
+        target = float(gb)
 
         if weekly_required is None:
             return 'Insufficient history or unclear trend to generate a goal plan.'
 
-        # Compute daily calorie change estimate: 1 kg fat ~ 7700 kcal
-        # weekly_required is units/week; map to kcal/week and kcal/day
-        kcal_per_unit = 7700.0 if metric == 'weight' else 0.0
-        kcal_week = weekly_required * kcal_per_unit
-        kcal_day = kcal_week / 7.0 if kcal_week else 0.0
-
         lines = []
-        lines.append(f"Current {metric}: {current:.2f}")
-        lines.append(f"Target {metric}: {target:.2f}")
-        lines.append(f"Required weekly change: {weekly_required:.2f} {metric}/week")
-        if kcal_week:
-            sign = 'increase' if kcal_week > 0 else 'decrease'
-            lines.append(f"Approx. calories to {sign} per day: {abs(kcal_day):.0f} kcal/day (≈ {abs(kcal_week):.0f} kcal/week)")
+        lines.append(f"Current BMI: {current:.2f}")
+        lines.append(f"Target BMI: {target:.2f}")
+        lines.append(f"Required weekly change: {weekly_required:.2f} BMI/week")
 
         lines.append('')
         lines.append('12-week micro-plan (weekly target):')
-        # Populate week-by-week targets
         for w in range(1, weeks + 1):
             expected = current + weekly_required * w
-            lines.append(f" Week {w:2d}: target {metric} ≈ {expected:.2f}")
+            lines.append(f" Week {w:2d}: target BMI ~ {expected:.2f}")
 
         lines.append('')
         lines.append('Actionable recommendations:')
-        # Calorie / macronutrient suggestions
-        if metric == 'weight':
-            if weekly_required < 0:
-                lines.append('- Focus on a moderate calorie deficit while keeping protein high to preserve muscle.')
-                lines.append('- Protein target: 1.2–1.6 g/kg bodyweight per day; prioritize lean proteins.')
-                lines.append('- Sample: breakfast - Greek yogurt + oats; lunch - salad with grilled chicken/tempeh; dinner - fish/beans + veg.')
-            else:
-                lines.append('- To gain weight, add a controlled calorie surplus with nutrient-dense foods.')
-                lines.append('- Aim for 1.2–1.8 g/kg protein per day and add 1–2 calorie-dense snacks (nuts, smoothies).')
-                lines.append('- Sample: breakfast - oatmeal with nut butter and banana; snack - smoothie with milk+protein powder; dinner - rice + chicken/tofu.')
-
-        # Exercise suggestions
-        lines.append('- Aim for 2–3 strength sessions per week and 2–3 moderate cardio sessions.')
+        lines.append('- Aim for 2-3 strength sessions per week and 2-3 moderate cardio sessions.')
         lines.append('- Prioritize progressive overload for muscle maintenance/growth; add low-impact cardio for fat loss.')
 
-        # Weekly checklist
         lines.append('')
         lines.append('Weekly checklist:')
-        lines.append('- Track weight once per week at the same time of day.')
-        lines.append('- Prepare 2–3 meals in advance (meal prep).')
+        lines.append('- Track BMI once per week at the same time of day.')
+        lines.append('- Prepare 2-3 meals in advance (meal prep).')
         lines.append('- Complete at least one strength session and two shorter activity sessions.')
 
         return '\n'.join(lines)
@@ -1520,14 +1518,10 @@ bodybuilder_var = tk.IntVar()
 bodybuilder_check = ttk.Checkbutton(left_frame, text='Bodybuilder', variable=bodybuilder_var)
 bodybuilder_check.grid(row=6, column=0, columnspan=2, sticky='w', pady=(0, 6))
 
-# Goal inputs
-ttk.Label(left_frame, text='Goal Weight (kg):', font=label_font).grid(row=7, column=0, sticky='w')
-goal_weight_entry = ttk.Entry(left_frame, font=entry_font)
-goal_weight_entry.grid(row=7, column=1, sticky='ew', padx=6, pady=2)
-
-ttk.Label(left_frame, text='Goal BMI:', font=label_font).grid(row=8, column=0, sticky='w')
+# Goal inputs (BMI only)
+ttk.Label(left_frame, text='Goal BMI:', font=label_font).grid(row=7, column=0, sticky='w')
 goal_bmi_entry = ttk.Entry(left_frame, font=entry_font)
-goal_bmi_entry.grid(row=8, column=1, sticky='ew', padx=6, pady=2)
+goal_bmi_entry.grid(row=7, column=1, sticky='ew', padx=6, pady=2)
 
 left_frame.columnconfigure(1, weight=1)
 
@@ -1604,10 +1598,14 @@ history_button.grid(row=0, column=4, padx=6, pady=2)
 # Profiles in right_frame
 profiles_frame = ttk.Frame(right_frame)
 profiles_frame.pack(fill='both', expand=True)
-profiles_tree = ttk.Treeview(profiles_frame, columns=('name', 'saved_at'), show='headings', height=12)
+profiles_tree = ttk.Treeview(profiles_frame, columns=('name', 'age', 'gender', 'saved_at'), show='headings', height=12)
 profiles_tree.heading('name', text='Name')
+profiles_tree.heading('age', text='Age')
+profiles_tree.heading('gender', text='Gender')
 profiles_tree.heading('saved_at', text='Saved At')
 profiles_tree.column('name', width=160)
+profiles_tree.column('age', width=60)
+profiles_tree.column('gender', width=80)
 profiles_tree.column('saved_at', width=140)
 profiles_tree.pack(side='left', fill='both', expand=True)
 
@@ -1665,4 +1663,6 @@ root.bind('<Control-q>', lambda e: root.quit())
 if __name__ == '__main__':
     # Run the main event loop
     root.mainloop()
+
+
 
