@@ -1,13 +1,5 @@
 import tkinter as tk
 from tkinter import messagebox
-import matplotlib
-matplotlib.use('TkAgg')
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-
-# Keep pyplot non-interactive for safety
-plt.ioff()
 from tkinter import filedialog, ttk
 import csv
 import json
@@ -17,7 +9,39 @@ import shutil
 from datetime import datetime
 import unicodedata
 import tempfile
-import matplotlib.dates as mdates
+
+# Lazy matplotlib imports to improve startup time
+_MPL_READY = False
+plt = None
+Figure = None
+FigureCanvasTkAgg = None
+NavigationToolbar2Tk = None
+mdates = None
+
+def ensure_matplotlib():
+    global _MPL_READY, plt, Figure, FigureCanvasTkAgg, NavigationToolbar2Tk, mdates
+    if _MPL_READY:
+        return True
+    try:
+        import matplotlib
+        matplotlib.use('TkAgg')
+        import matplotlib.pyplot as _plt
+        from matplotlib.figure import Figure as _Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FigureCanvasTkAgg
+        from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk as _NavigationToolbar2Tk
+        import matplotlib.dates as _mdates
+
+        _plt.ioff()
+        plt = _plt
+        Figure = _Figure
+        FigureCanvasTkAgg = _FigureCanvasTkAgg
+        NavigationToolbar2Tk = _NavigationToolbar2Tk
+        mdates = _mdates
+        _MPL_READY = True
+        return True
+    except Exception as e:
+        messagebox.showerror('Error', f'Failed to load plotting libraries: {e}')
+        return False
 
 # Define default colors and themes (kept for compatibility)
 DEFAULT_THEME = {
@@ -770,6 +794,8 @@ def validate_input(weight_str, height_str, age_str):
     return True
 
 def plot_bmi_categories(user_bmi):
+    if not ensure_matplotlib():
+        return
     # Create a Figure and draw onto it, then embed into the GUI
     try:
         plt.close('all')
@@ -976,6 +1002,8 @@ def export_report():
                     pdf.multi_cell(0, 6, txt=txt_advice)
 
                     # Generate and include plots (trend + BMI categories)
+                    if not ensure_matplotlib():
+                        return
                     tmp_files = []
                     try:
                         # Trend image for this profile
@@ -1120,6 +1148,8 @@ def add_history_entry(name, weight, height, bmi, age=None, gender=None, bodybuil
 
 def plot_profile_history(profile_name):
     """Plot stored weight and BMI over time for a given profile."""
+    if not ensure_matplotlib():
+        return
     try:
         profiles = load_profiles_file()
         profile = profiles.get(profile_name)
@@ -1425,6 +1455,12 @@ if USE_TTB and _style is not None:
 else:
     root = tk.Tk()
     root.title("Personal Health Assistant")
+try:
+    _icon_path = os.path.join(base_path, "PersonalHealthAssistant.ico")
+    if os.path.exists(_icon_path):
+        root.iconbitmap(_icon_path)
+except Exception:
+    pass
 window_width = 800
 window_height = 800
 screen_width = root.winfo_screenwidth()
@@ -1629,7 +1665,7 @@ show_eta_button = make_button(action_frame, text='Show ETA', command=lambda: sho
 show_eta_button.pack(side='left', padx=6, pady=4)
 
 profiles_tree.bind('<Double-1>', lambda e: load_selected_profile())
-update_profiles_view()
+root.after(50, update_profiles_view)
 
 # Results and embedded plot in bottom_frame
 # Create two sub-frames so results appear bottom-left and graph bottom-right
