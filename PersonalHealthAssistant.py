@@ -18,6 +18,10 @@ FigureCanvasTkAgg = None
 NavigationToolbar2Tk = None
 mdates = None
 
+# Profiles cache to reduce disk I/O
+_PROFILES_CACHE = None
+_PROFILES_MTIME = None
+
 def ensure_matplotlib():
     global _MPL_READY, plt, Figure, FigureCanvasTkAgg, NavigationToolbar2Tk, mdates
     if _MPL_READY:
@@ -197,8 +201,15 @@ def load_profiles_file():
                 shutil.copy2(bundled_profiles, PROFILES_FILE)
 
         if os.path.exists(PROFILES_FILE):
+            mtime = os.path.getmtime(PROFILES_FILE)
+            global _PROFILES_CACHE, _PROFILES_MTIME
+            if _PROFILES_CACHE is not None and _PROFILES_MTIME == mtime:
+                return _PROFILES_CACHE
             with open(PROFILES_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            _PROFILES_CACHE = data
+            _PROFILES_MTIME = mtime
+            return data
     except Exception:
         pass
     return {}
@@ -207,6 +218,12 @@ def save_profiles_file(profiles):
     try:
         with open(PROFILES_FILE, 'w', encoding='utf-8') as f:
             json.dump(profiles, f, indent=2)
+        try:
+            global _PROFILES_CACHE, _PROFILES_MTIME
+            _PROFILES_CACHE = profiles
+            _PROFILES_MTIME = os.path.getmtime(PROFILES_FILE)
+        except Exception:
+            pass
         return True
     except Exception as e:
         messagebox.showerror('Error', f'Failed to save profiles: {e}')
@@ -507,6 +524,8 @@ def generate_personalized_advice(bmi_category, gender, age, is_bodybuilder, is_e
     """
     lines = []
     lines.append(f"Summary: You are classified as {bmi_category}. {base_advice}")
+    if base_plan:
+        lines.append(f"Exercise plan: {base_plan}")
 
     # Tone and focus
     focus = "muscle-building and higher protein" if is_bodybuilder else "balanced health and gradual change"
@@ -580,28 +599,8 @@ def calculate_and_show_bmi():
         bmi = calculate_bmi(weight, height)
         status, color, advice, plan = interpret_bmi(weight, height, gender, is_bodybuilder=is_bodybuilder, is_expectant=is_expectant)
 
-        # Record data for tracking
+        # Record data for tracking (single write, avoids duplicate history)
         name = name_entry.get().strip()
-        if name:
-            try:
-                profiles = load_profiles_file()
-                if name not in profiles:
-                    profiles[name] = {'history': []}
-                entry = {
-                    'date': datetime.utcnow().isoformat(),
-                    'weight': weight,
-                    'height': height,
-                    'bmi': bmi,
-                    'category': status.split(' ')[0],
-                    'gender': gender,
-                    'age': age,
-                    'bodybuilder': is_bodybuilder,
-                    'expectant': is_expectant
-                }
-                profiles[name]['history'].append(entry)
-                save_profiles_file(profiles)
-            except Exception:
-                pass  # Silently fail for history recording
 
         # Generate expanded AI-like suggestions using diet preference and profile
         diet_pref = 'Omnivore'
@@ -611,6 +610,8 @@ def calculate_and_show_bmi():
         # Analyze trend for encouragement/warning
         trend_message = ""
         goal_message = ""
+        profiles = None
+        profile = {}
         if name:
             try:
                 profiles = load_profiles_file()
@@ -712,9 +713,11 @@ def calculate_and_show_bmi():
         # If a named profile has a goal, append a goal-achievement micro-plan
         try:
             name = name_entry.get().strip()
-            profiles = load_profiles_file()
-            if name and name in profiles and profiles[name].get('goal'):
-                goal_plan = generate_goal_plan(name)
+            if name:
+                if profiles is None:
+                    profiles = load_profiles_file()
+                if name in profiles and profiles[name].get('goal'):
+                    goal_plan = generate_goal_plan(name, profiles=profiles)
                 if goal_plan:
                     detailed = detailed + "\n\nGOAL PLAN:\n" + goal_plan
         except Exception:
@@ -730,12 +733,14 @@ def calculate_and_show_bmi():
             summary += "\n\n" + trend_message
         result_label.config(text=summary, foreground=color)
 
-        # Plot BMI categories
-        plot_bmi_categories(bmi)
+        # Plot BMI categories (defer to keep UI responsive)
+        try:
+            root.after(0, lambda: plot_bmi_categories(bmi))
+        except Exception:
+            plot_bmi_categories(bmi)
 
         # Record reading into profile history when a name is provided.
         try:
-            name = name_entry.get().strip()
             if name:
                 add_history_entry(
                     name,
@@ -940,21 +945,21 @@ def export_report():
                 if export_file.endswith('.pdf'):
                     from fpdf import FPDF
     
-                    # Define page size for landscape orientation (width, height)
-                    pdf = FPDF(orientation='L', unit='mm', format='A4')
+                    # A4 portrait
+                    pdf = FPDF(orientation='P', unit='mm', format='A4')
     
                     # Add a page
                     pdf.set_auto_page_break(auto=True, margin=12)
 
-                    # Set font
-                    pdf.set_font("Arial", size=12)
+                    # Set font: Times New Roman (FPDF core font: Times)
+                    pdf.set_font("Times", size=12)
 
                     # Title page with summary
                     pdf.add_page()
-                    pdf.set_font("Arial", 'B', 16)
-                    pdf.cell(0, 10, 'BMI Report', ln=True, align='C')
-                    pdf.ln(4)
-                    pdf.set_font("Arial", size=12)
+                    pdf.set_font("Times", 'B', 12)
+                    pdf.cell(0, 8, 'BMI Report', ln=True, align='C')
+                    pdf.ln(2)
+                    pdf.set_font("Times", size=12)
 
                     def _s(text):
                         # sanitize text for latin-1 PDF output
@@ -980,13 +985,25 @@ def export_report():
                     pdf.cell(0, 8, _s(f'Gender: {gender}'), ln=True)
                     pdf.cell(0, 8, _s(f'BMI: {bmi:.2f}'), ln=True)
                     pdf.cell(0, 8, _s(f'Weight Status: {status}'), ln=True)
-                    pdf.ln(6)
+                    pdf.ln(4)
 
                     # Detailed advice and plan
-                    pdf.set_font("Arial", 'B', 12)
+                    pdf.set_font("Times", 'B', 12)
                     pdf.cell(0, 8, 'Detailed Advice:', ln=True)
-                    pdf.set_font("Arial", size=11)
-                    txt_advice = globals().get('last_advice_text') or advice
+                    pdf.set_font("Times", size=12)
+                    txt_advice = globals().get('last_advice_text')
+                    if not txt_advice:
+                        diet_pref = 'Omnivore'
+                        txt_advice = generate_personalized_advice(
+                            status.split(' ')[0],
+                            gender,
+                            age,
+                            is_bodybuilder,
+                            is_expectant,
+                            diet_pref,
+                            advice,
+                            plan,
+                        )
                     # sanitize detailed advice
                     try:
                         txt_advice = unicodedata.normalize('NFKD', str(txt_advice))
@@ -999,7 +1016,8 @@ def export_report():
                         txt_advice.encode('latin-1')
                     except UnicodeEncodeError:
                         txt_advice = txt_advice.encode('latin-1', 'replace').decode('latin-1')
-                    pdf.multi_cell(0, 6, txt=txt_advice)
+                    line_h = pdf.font_size * 1.5
+                    pdf.multi_cell(0, line_h, txt=txt_advice, align='J')
 
                     # Generate and include plots (trend + BMI categories)
                     if not ensure_matplotlib():
@@ -1072,7 +1090,7 @@ def export_report():
                         if trend_img:
                             tmp_files.append(trend_img)
                             pdf.add_page()
-                            pdf.set_font('Arial', 'B', 12)
+                            pdf.set_font('Times', 'B', 12)
                             pdf.cell(0, 8, 'Trend: Weight and BMI over time', ln=True)
                             pdf.image(trend_img, x=10, y=30, w=pdf.w - 20)
 
@@ -1080,7 +1098,7 @@ def export_report():
                         if bmi_img:
                             tmp_files.append(bmi_img)
                             pdf.add_page()
-                            pdf.set_font('Arial', 'B', 12)
+                            pdf.set_font('Times', 'B', 12)
                             pdf.cell(0, 8, 'BMI Categories (with your BMI)', ln=True)
                             pdf.image(bmi_img, x=10, y=30, w=pdf.w - 20)
 
@@ -1261,13 +1279,14 @@ def _compute_linear_slope(history, key):
         return None
 
 
-def estimate_eta_for_profile(profile_name, goal_bmi=None):
+def estimate_eta_for_profile(profile_name, goal_bmi=None, profiles=None):
     """Estimate ETA (in days) to reach a BMI goal using linear trend from history.
 
     Returns (eta_days, weekly_target) or (None, None) if cannot estimate.
     """
     try:
-        profiles = load_profiles_file()
+        if profiles is None:
+            profiles = load_profiles_file()
         profile = profiles.get(profile_name)
         if not profile:
             return None, None
@@ -1355,7 +1374,7 @@ def show_eta_for_selected():
         messagebox.showinfo('No Goal', 'No BMI goal set for this profile. Enter a Goal BMI and click Save Goal.')
         return
 
-    days, weekly = estimate_eta_for_profile(name, goal_bmi=gb)
+    days, weekly = estimate_eta_for_profile(name, goal_bmi=gb, profiles=profiles)
     if days is None:
         messagebox.showinfo('Unable to estimate', 'Insufficient history or no clear trend to estimate ETA.')
         return
@@ -1370,13 +1389,14 @@ def show_eta_for_selected():
     messagebox.showinfo('ETA & Targets', '\n'.join(parts))
 
 
-def generate_goal_plan(profile_name, weeks=12):
+def generate_goal_plan(profile_name, weeks=12, profiles=None):
     """Generate a week-by-week micro-plan to reach the saved BMI goal for a profile.
 
     Returns a formatted string describing weekly targets and sample action items.
     """
     try:
-        profiles = load_profiles_file()
+        if profiles is None:
+            profiles = load_profiles_file()
         profile = profiles.get(profile_name)
         if not profile:
             return ''
@@ -1399,7 +1419,7 @@ def generate_goal_plan(profile_name, weeks=12):
         if gb is None:
             return ''
 
-        days, weekly_required = estimate_eta_for_profile(profile_name, goal_bmi=gb)
+        days, weekly_required = estimate_eta_for_profile(profile_name, goal_bmi=gb, profiles=profiles)
         current = current_bmi
         target = float(gb)
 
@@ -1455,12 +1475,23 @@ if USE_TTB and _style is not None:
 else:
     root = tk.Tk()
     root.title("Personal Health Assistant")
-try:
-    _icon_path = os.path.join(base_path, "PersonalHealthAssistant.ico")
-    if os.path.exists(_icon_path):
-        root.iconbitmap(_icon_path)
-except Exception:
-    pass
+def _set_app_icon(root_window):
+    # Ensure taskbar and title bar use the app icon on Windows
+    try:
+        import ctypes
+        app_id = "PersonalHealthAssistant.App"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+    try:
+        icon_path = os.path.join(base_path, "PersonalHealthAssistant.ico")
+        if os.path.exists(icon_path):
+            root_window.iconbitmap(icon_path)
+    except Exception:
+        pass
+
+_set_app_icon(root)
 window_width = 800
 window_height = 800
 screen_width = root.winfo_screenwidth()
@@ -1699,6 +1730,3 @@ root.bind('<Control-q>', lambda e: root.quit())
 if __name__ == '__main__':
     # Run the main event loop
     root.mainloop()
-
-
-
